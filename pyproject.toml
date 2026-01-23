@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "clickup-mcp"
+name = "clickup-full-api-mcp"
 version = "1.0.0"
 description = "Comprehensive MCP server for ClickUp API - full coverage of all endpoints"
 readme = "README.md"
@@ -36,7 +36,7 @@ dev = [
 ]
 
 [project.scripts]
-clickup-mcp = "clickup_mcp.cli:main"
+clickup-full-api-mcp = "clickup_mcp.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/clickup_mcp"]
