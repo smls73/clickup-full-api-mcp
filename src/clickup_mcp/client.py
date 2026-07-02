@@ -1275,3 +1275,92 @@ class ClickUpClient:
     async def get_shared_hierarchy(self, team_id: str) -> dict:
         """Get shared hierarchy."""
         return await self.get(f"/team/{team_id}/shared")
+
+    # ===== Docs (API v3) =====
+
+    V3_URL = "https://api.clickup.com/api/v3"
+
+    async def search_docs(self, team_id: str, query: Optional[str] = None, cursor: Optional[str] = None) -> dict:
+        """Search docs in a workspace."""
+        return await self.get(f"{self.V3_URL}/workspaces/{team_id}/docs", params={"search": query, "next_cursor": cursor})
+
+    async def create_doc(self, team_id: str, name: str, parent: Optional[dict] = None, visibility: Optional[str] = None) -> dict:
+        """Create a doc."""
+        data: dict[str, Any] = {"name": name}
+        if parent:
+            data["parent"] = parent
+        if visibility:
+            data["visibility"] = visibility
+        return await self.post(f"{self.V3_URL}/workspaces/{team_id}/docs", json=data)
+
+    async def get_doc_page_listing(self, team_id: str, doc_id: str) -> dict:
+        """Get the page tree (ids + names, no content) of a doc."""
+        return await self.get(f"{self.V3_URL}/workspaces/{team_id}/docs/{doc_id}/pageListing")
+
+    async def get_doc_pages(self, team_id: str, doc_id: str, content_format: str = "text/md") -> dict:
+        """Get all pages of a doc including content."""
+        return await self.get(f"{self.V3_URL}/workspaces/{team_id}/docs/{doc_id}/pages", params={"content_format": content_format})
+
+    async def get_doc_page(self, team_id: str, doc_id: str, page_id: str, content_format: str = "text/md") -> dict:
+        """Get one page of a doc."""
+        return await self.get(f"{self.V3_URL}/workspaces/{team_id}/docs/{doc_id}/pages/{page_id}", params={"content_format": content_format})
+
+    async def create_doc_page(
+        self,
+        team_id: str,
+        doc_id: str,
+        name: str,
+        content: str,
+        parent_page_id: Optional[str] = None,
+        sub_title: Optional[str] = None,
+        content_format: str = "text/md",
+    ) -> dict:
+        """Create a page (or subpage) in a doc."""
+        data: dict[str, Any] = {"name": name, "content": content, "content_format": content_format}
+        if parent_page_id:
+            data["parent_page_id"] = parent_page_id
+        if sub_title:
+            data["sub_title"] = sub_title
+        return await self.post(f"{self.V3_URL}/workspaces/{team_id}/docs/{doc_id}/pages", json=data)
+
+    async def update_doc_page(
+        self,
+        team_id: str,
+        doc_id: str,
+        page_id: str,
+        content: Optional[str] = None,
+        name: Optional[str] = None,
+        sub_title: Optional[str] = None,
+        content_edit_mode: str = "append",
+        content_format: str = "text/md",
+    ) -> dict:
+        """Update a doc page. Default edit mode is APPEND (replace flattens task chips)."""
+        data: dict[str, Any] = {"content_edit_mode": content_edit_mode, "content_format": content_format}
+        if content is not None:
+            data["content"] = content
+        if name is not None:
+            data["name"] = name
+        if sub_title is not None:
+            data["sub_title"] = sub_title
+        return await self.put(f"{self.V3_URL}/workspaces/{team_id}/docs/{doc_id}/pages/{page_id}", json=data)
+
+    # ===== Chat (API v3) =====
+
+    async def get_chat_channels(self, team_id: str, cursor: Optional[str] = None) -> dict:
+        """Get chat channels (incl. DMs) in a workspace."""
+        return await self.get(f"{self.V3_URL}/workspaces/{team_id}/chat/channels", params={"next_cursor": cursor})
+
+    async def get_chat_messages(self, team_id: str, channel_id: str, cursor: Optional[str] = None) -> dict:
+        """Get messages in a chat channel."""
+        return await self.get(f"{self.V3_URL}/workspaces/{team_id}/chat/channels/{channel_id}/messages", params={"next_cursor": cursor})
+
+    async def send_chat_message(self, team_id: str, channel_id: str, content: str, msg_type: str = "message") -> dict:
+        """Send a message to a chat channel."""
+        return await self.post(
+            f"{self.V3_URL}/workspaces/{team_id}/chat/channels/{channel_id}/messages",
+            json={"type": msg_type, "content": content},
+        )
+
+    async def get_chat_message_replies(self, team_id: str, message_id: str, cursor: Optional[str] = None) -> dict:
+        """Get replies to a chat message."""
+        return await self.get(f"{self.V3_URL}/workspaces/{team_id}/chat/messages/{message_id}/replies", params={"next_cursor": cursor})

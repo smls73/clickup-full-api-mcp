@@ -7,6 +7,7 @@ from mcp.server import Server
 from mcp.types import TextContent, Tool
 
 from .client import ClickUpClient
+from .safety import SafetyError, check as safety_check
 
 # Initialize server
 server = Server("clickup-mcp")
@@ -1696,6 +1697,169 @@ TOOLS = [
             "required": ["team_id"],
         },
     ),
+    # ----- Docs (API v3) -----
+    Tool(
+        name="search_docs",
+        description="Search docs in a workspace (API v3)",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "team_id": {"type": "string", "description": "Workspace/Team ID"},
+                "query": {"type": "string", "description": "Search text (optional)"},
+                "cursor": {"type": "string", "description": "Pagination cursor (optional)"},
+            },
+            "required": ["team_id"],
+        },
+    ),
+    Tool(
+        name="create_doc",
+        description="Create a doc in a workspace (API v3)",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "team_id": {"type": "string", "description": "Workspace/Team ID"},
+                "name": {"type": "string", "description": "Doc name"},
+                "parent": {"type": "object", "description": "Optional parent: {id, type} (type: 4=space, 5=folder, 6=list, 7=everything, 12=workspace)"},
+                "visibility": {"type": "string", "description": "PUBLIC or PRIVATE (optional)"},
+            },
+            "required": ["team_id", "name"],
+        },
+    ),
+    Tool(
+        name="get_doc_page_listing",
+        description="Get a doc's page tree (ids + names, no content) (API v3)",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "team_id": {"type": "string", "description": "Workspace/Team ID"},
+                "doc_id": {"type": "string", "description": "Doc ID"},
+            },
+            "required": ["team_id", "doc_id"],
+        },
+    ),
+    Tool(
+        name="get_doc_pages",
+        description="Get all pages of a doc including content (API v3)",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "team_id": {"type": "string", "description": "Workspace/Team ID"},
+                "doc_id": {"type": "string", "description": "Doc ID"},
+                "content_format": {"type": "string", "description": "text/md (default) or text/plain", "default": "text/md"},
+            },
+            "required": ["team_id", "doc_id"],
+        },
+    ),
+    Tool(
+        name="get_doc_page",
+        description="Get one page of a doc (API v3)",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "team_id": {"type": "string", "description": "Workspace/Team ID"},
+                "doc_id": {"type": "string", "description": "Doc ID"},
+                "page_id": {"type": "string", "description": "Page ID"},
+                "content_format": {"type": "string", "description": "text/md (default) or text/plain", "default": "text/md"},
+            },
+            "required": ["team_id", "doc_id", "page_id"],
+        },
+    ),
+    Tool(
+        name="create_doc_page",
+        description="Create a page or subpage in a doc (API v3). Preferred way to add doc content.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "team_id": {"type": "string", "description": "Workspace/Team ID"},
+                "doc_id": {"type": "string", "description": "Doc ID"},
+                "name": {"type": "string", "description": "Page name"},
+                "content": {"type": "string", "description": "Page content (markdown)"},
+                "parent_page_id": {"type": "string", "description": "Parent page ID to nest under (optional)"},
+                "sub_title": {"type": "string", "description": "Page subtitle (optional)"},
+                "content_format": {"type": "string", "description": "text/md (default) or text/plain", "default": "text/md"},
+            },
+            "required": ["team_id", "doc_id", "name", "content"],
+        },
+    ),
+    Tool(
+        name="update_doc_page",
+        description=(
+            "Update a doc page (API v3). content_edit_mode defaults to 'append' (safe). "
+            "'replace' REWRITES the page and flattens live task chips — it requires the "
+            "confirm token (RED tier)."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "team_id": {"type": "string", "description": "Workspace/Team ID"},
+                "doc_id": {"type": "string", "description": "Doc ID"},
+                "page_id": {"type": "string", "description": "Page ID"},
+                "content": {"type": "string", "description": "Content to write (markdown)"},
+                "name": {"type": "string", "description": "New page name (optional)"},
+                "sub_title": {"type": "string", "description": "New subtitle (optional)"},
+                "content_edit_mode": {"type": "string", "description": "append (default) | prepend | replace (replace = RED tier, needs confirm)", "default": "append"},
+                "content_format": {"type": "string", "description": "text/md (default) or text/plain", "default": "text/md"},
+            },
+            "required": ["team_id", "doc_id", "page_id"],
+        },
+    ),
+    # ----- Chat (API v3) -----
+    Tool(
+        name="get_chat_channels",
+        description="Get chat channels including DMs (API v3). DMs list member ids only, no names.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "team_id": {"type": "string", "description": "Workspace/Team ID"},
+                "cursor": {"type": "string", "description": "Pagination cursor (optional)"},
+            },
+            "required": ["team_id"],
+        },
+    ),
+    Tool(
+        name="get_chat_messages",
+        description="Get messages in a chat channel (API v3)",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "team_id": {"type": "string", "description": "Workspace/Team ID"},
+                "channel_id": {"type": "string", "description": "Channel ID"},
+                "cursor": {"type": "string", "description": "Pagination cursor (optional)"},
+            },
+            "required": ["team_id", "channel_id"],
+        },
+    ),
+    Tool(
+        name="send_chat_message",
+        description=(
+            "Send a message to a chat channel or DM (API v3). RED tier: requires the "
+            "confirm token, only after the human has approved the exact message text "
+            "and the sending account."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "team_id": {"type": "string", "description": "Workspace/Team ID"},
+                "channel_id": {"type": "string", "description": "Channel ID"},
+                "content": {"type": "string", "description": "Message text (markdown)"},
+                "msg_type": {"type": "string", "description": "message (default) or post", "default": "message"},
+            },
+            "required": ["team_id", "channel_id", "content"],
+        },
+    ),
+    Tool(
+        name="get_chat_message_replies",
+        description="Get replies to a chat message (API v3)",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "team_id": {"type": "string", "description": "Workspace/Team ID"},
+                "message_id": {"type": "string", "description": "Message ID"},
+                "cursor": {"type": "string", "description": "Pagination cursor (optional)"},
+            },
+            "required": ["team_id", "message_id"],
+        },
+    ),
 ]
 
 
@@ -1711,8 +1875,11 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     client = get_client()
 
     try:
+        arguments = safety_check(name, arguments)
         result = await execute_tool(client, name, arguments)
         return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+    except SafetyError as e:
+        return [TextContent(type="text", text=json.dumps({"blocked": str(e)}))]
     except Exception as e:
         return [TextContent(type="text", text=json.dumps({"error": str(e)}))]
 
@@ -2140,6 +2307,39 @@ async def execute_tool(client: ClickUpClient, name: str, args: dict[str, Any]) -
     # Shared Hierarchy
     elif name == "get_shared_hierarchy":
         return await client.get_shared_hierarchy(args["team_id"])
+
+    # Docs (API v3)
+    elif name == "search_docs":
+        return await client.search_docs(args["team_id"], args.get("query"), args.get("cursor"))
+    elif name == "create_doc":
+        return await client.create_doc(args["team_id"], args["name"], args.get("parent"), args.get("visibility"))
+    elif name == "get_doc_page_listing":
+        return await client.get_doc_page_listing(args["team_id"], args["doc_id"])
+    elif name == "get_doc_pages":
+        return await client.get_doc_pages(args["team_id"], args["doc_id"], args.get("content_format", "text/md"))
+    elif name == "get_doc_page":
+        return await client.get_doc_page(args["team_id"], args["doc_id"], args["page_id"], args.get("content_format", "text/md"))
+    elif name == "create_doc_page":
+        return await client.create_doc_page(
+            args["team_id"], args["doc_id"], args["name"], args["content"],
+            args.get("parent_page_id"), args.get("sub_title"), args.get("content_format", "text/md"),
+        )
+    elif name == "update_doc_page":
+        return await client.update_doc_page(
+            args["team_id"], args["doc_id"], args["page_id"], args.get("content"),
+            args.get("name"), args.get("sub_title"), args.get("content_edit_mode", "append"),
+            args.get("content_format", "text/md"),
+        )
+
+    # Chat (API v3)
+    elif name == "get_chat_channels":
+        return await client.get_chat_channels(args["team_id"], args.get("cursor"))
+    elif name == "get_chat_messages":
+        return await client.get_chat_messages(args["team_id"], args["channel_id"], args.get("cursor"))
+    elif name == "send_chat_message":
+        return await client.send_chat_message(args["team_id"], args["channel_id"], args["content"], args.get("msg_type", "message"))
+    elif name == "get_chat_message_replies":
+        return await client.get_chat_message_replies(args["team_id"], args["message_id"], args.get("cursor"))
 
     else:
         raise ValueError(f"Unknown tool: {name}")
