@@ -9,11 +9,9 @@ Mirrors the write-safety tiers in the global `clickup` skill
          confirm="CONFIRM <tool_name>" — only after the human has given
          an explicit, named yes in chat.
 - ADMIN  (workspace membership, guests, permissions): always blocked.
-         These are human-only actions. Set CLICKUP_MCP_ALLOW_ADMIN=true
-         to unblock (not recommended).
+         These are human-only actions. No bypass.
 """
 
-import os
 from typing import Any
 
 # Deletions and standing-config changes: need a per-call confirm token.
@@ -67,12 +65,10 @@ def check(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     """Gate a tool call. Returns the arguments to forward (confirm key
     stripped). Raises SafetyError when the call must not proceed."""
     if name in ADMIN_TOOLS:
-        if os.environ.get("CLICKUP_MCP_ALLOW_ADMIN", "").lower() != "true":
-            raise SafetyError(
-                f"'{name}' is blocked: workspace membership/guest/permission "
-                "changes are human-only. Scott must do this in the ClickUp UI."
-            )
-        return arguments
+        raise SafetyError(
+            f"'{name}' is blocked: workspace membership/guest/permission "
+            "changes are human-only. Scott must do this in the ClickUp UI."
+        )
 
     # Doc page rewrite: 'replace' flattens live task chips -> RED.
     # 'append'/'prepend' stay green.
