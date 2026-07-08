@@ -316,6 +316,12 @@ TOOLS = [
                 "date_created_lt": {"type": "integer", "description": "Created before (ms timestamp)"},
                 "date_updated_gt": {"type": "integer", "description": "Updated after (ms timestamp)"},
                 "date_updated_lt": {"type": "integer", "description": "Updated before (ms timestamp)"},
+                "date_done_gt": {"type": "integer", "description": "Completed after (ms timestamp)"},
+                "date_done_lt": {"type": "integer", "description": "Completed before (ms timestamp)"},
+                "watchers": {"type": "array", "items": {"type": "string"}, "description": "Filter by watcher user IDs"},
+                "custom_fields": {"type": "array", "items": {"type": "object"}, "description": "Custom field filters: [{field_id, operator, value}] ('=' unsupported for Label fields)"},
+                "custom_items": {"type": "array", "items": {"type": "integer"}, "description": "Filter by task type (0=task, 1=Milestone)"},
+                "include_timl": {"type": "boolean", "description": "Include tasks whose home list is elsewhere (tasks in multiple lists)"},
                 "include_markdown_description": {"type": "boolean", "description": "Include markdown description"},
             },
             "required": ["list_id"],
@@ -329,21 +335,27 @@ TOOLS = [
             "properties": {
                 "list_id": {"type": "string", "description": "List ID"},
                 "name": {"type": "string", "description": "Task name"},
-                "description": {"type": "string", "description": "Task description"},
-                "markdown_description": {"type": "string", "description": "Markdown description"},
+                "description": {"type": "string", "description": "Task description (plain text)"},
+                "markdown_content": {"type": "string", "description": "Markdown description (overrides description if both sent)"},
+                "markdown_description": {"type": "string", "description": "DEPRECATED alias of markdown_content"},
                 "assignees": {"type": "array", "items": {"type": "integer"}, "description": "Assignee user IDs"},
+                "group_assignees": {"type": "array", "items": {"type": "string"}, "description": "User group IDs to assign"},
                 "tags": {"type": "array", "items": {"type": "string"}, "description": "Tag names"},
                 "status": {"type": "string", "description": "Status name"},
-                "priority": {"type": "integer", "description": "Priority (1=urgent, 2=high, 3=normal, 4=low)"},
-                "due_date": {"type": "integer", "description": "Due date timestamp (ms)"},
+                "priority": {"type": ["integer", "null"], "description": "Priority (1=urgent, 2=high, 3=normal, 4=low, null=none)"},
+                "due_date": {"type": ["integer", "null"], "description": "Due date timestamp (ms), or null for none"},
                 "due_date_time": {"type": "boolean", "description": "Include time in due date"},
                 "time_estimate": {"type": "integer", "description": "Time estimate in milliseconds"},
-                "start_date": {"type": "integer", "description": "Start date timestamp (ms)"},
+                "start_date": {"type": ["integer", "null"], "description": "Start date timestamp (ms), or null for none"},
                 "start_date_time": {"type": "boolean", "description": "Include time in start date"},
-                "notify_all": {"type": "boolean", "description": "Notify all assignees"},
-                "parent": {"type": "string", "description": "Parent task ID for subtasks"},
-                "links_to": {"type": "string", "description": "Task ID to link to"},
-                "custom_fields": {"type": "array", "description": "Custom field values"},
+                "points": {"type": "number", "description": "Sprint points"},
+                "notify_all": {"type": "boolean", "description": "Also notify the creator (assignees/watchers always notified)"},
+                "parent": {"type": ["string", "null"], "description": "Parent task ID for subtasks (must be in the same list)"},
+                "links_to": {"type": ["string", "null"], "description": "Task ID to create a linked dependency with"},
+                "check_required_custom_fields": {"type": "boolean", "description": "Enforce required custom fields (API default: false)"},
+                "custom_fields": {"type": "array", "description": "Custom field values: [{id, value}]"},
+                "custom_item_id": {"type": ["number", "null"], "description": "Custom task type ID (0/omitted = standard Task)"},
+                "archived": {"type": "boolean", "description": "Create as archived"},
             },
             "required": ["list_id", "name"],
         },
@@ -373,18 +385,23 @@ TOOLS = [
                 "custom_task_ids": {"type": "boolean", "description": "task_id is a custom ID", "default": False},
                 "team_id": {"type": "string", "description": "Team ID (required with custom_task_ids)"},
                 "name": {"type": "string", "description": "New task name"},
-                "description": {"type": "string", "description": "New description"},
-                "markdown_description": {"type": "string", "description": "New markdown description"},
-                "assignees": {"type": "object", "description": "Assignees to add/remove: {add: [], rem: []}"},
+                "description": {"type": "string", "description": "New description (send a single space \" \" to clear it)"},
+                "markdown_content": {"type": "string", "description": "New markdown description (overrides description if both sent)"},
+                "markdown_description": {"type": "string", "description": "DEPRECATED alias of markdown_content"},
+                "assignees": {"type": "object", "description": "Assignees to add/remove: {add: [ids], rem: [ids]}"},
+                "group_assignees": {"type": "object", "description": "User groups to add/remove: {add: [uuids], rem: [uuids]}"},
+                "watchers": {"type": "object", "description": "Watchers to add/remove: {add: [ids], rem: [ids]}"},
                 "status": {"type": "string", "description": "New status"},
-                "priority": {"type": "integer", "description": "New priority (1-4 or null)"},
-                "due_date": {"type": "integer", "description": "New due date (ms timestamp)"},
+                "priority": {"type": ["integer", "null"], "description": "New priority (1-4), or null to CLEAR it"},
+                "due_date": {"type": ["integer", "null"], "description": "New due date (ms timestamp), or null to CLEAR it"},
                 "due_date_time": {"type": "boolean", "description": "Include time in due date"},
                 "time_estimate": {"type": "integer", "description": "Time estimate in ms"},
-                "start_date": {"type": "integer", "description": "Start date (ms timestamp)"},
+                "start_date": {"type": ["integer", "null"], "description": "Start date (ms timestamp), or null to CLEAR it"},
                 "start_date_time": {"type": "boolean", "description": "Include time in start date"},
+                "points": {"type": "number", "description": "Sprint points"},
+                "custom_item_id": {"type": ["integer", "null"], "description": "Task type (null/0=Task, 1=Milestone, other=custom type)"},
                 "archived": {"type": "boolean", "description": "Archive/unarchive task"},
-                "parent": {"type": "string", "description": "Move to different parent"},
+                "parent": {"type": "string", "description": "Move subtask to a different parent (cannot null-out a parent)"},
             },
             "required": ["task_id"],
         },
@@ -426,6 +443,12 @@ TOOLS = [
                 "date_created_lt": {"type": "integer", "description": "Created before (ms)"},
                 "date_updated_gt": {"type": "integer", "description": "Updated after (ms)"},
                 "date_updated_lt": {"type": "integer", "description": "Updated before (ms)"},
+                "date_done_gt": {"type": "integer", "description": "Completed after (ms)"},
+                "date_done_lt": {"type": "integer", "description": "Completed before (ms)"},
+                "parent": {"type": "string", "description": "Parent task ID (returns its subtasks)"},
+                "include_markdown_description": {"type": "boolean", "description": "Include markdown description"},
+                "custom_fields": {"type": "array", "items": {"type": "object"}, "description": "Custom field filters: [{field_id, operator, value}] ('=' unsupported for Label fields)"},
+                "custom_items": {"type": "array", "items": {"type": "integer"}, "description": "Filter by task type (0=task, 1=Milestone)"},
             },
             "required": ["team_id"],
         },
@@ -467,6 +490,85 @@ TOOLS = [
                 "name": {"type": "string", "description": "Task name"},
             },
             "required": ["list_id", "template_id", "name"],
+        },
+    ),
+    Tool(
+        name="move_task",
+        description=(
+            "Move a task to a new home list (API v3). RED tier: statuses/custom fields can be "
+            "clobbered by the remap, so it requires the confirm token. For tasks in multiple "
+            "lists only the HOME list changes."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "team_id": {"type": "string", "description": "Workspace/Team ID"},
+                "task_id": {"type": "string", "description": "Task ID (custom task IDs not supported)"},
+                "list_id": {"type": "string", "description": "Destination list ID (the new home list)"},
+                "move_custom_fields": {"type": "boolean", "description": "Add the current list's custom fields to the new list"},
+                "custom_fields_to_move": {"type": "array", "items": {"type": "string"}, "description": "Specific custom field IDs to move"},
+                "status_mappings": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": "[{source_status_id, destination_status_id}] — required if the current status doesn't exist in the new list",
+                },
+            },
+            "required": ["team_id", "task_id", "list_id"],
+        },
+    ),
+    Tool(
+        name="merge_tasks",
+        description=(
+            "Merge source tasks INTO a target task — the target survives, sources are absorbed. "
+            "CANNOT BE UNDONE. RED tier: requires the confirm token. Custom task IDs not supported."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "TARGET task ID (survives the merge)"},
+                "source_task_ids": {"type": "array", "items": {"type": "string"}, "description": "Task IDs merged INTO the target (absorbed)"},
+            },
+            "required": ["task_id", "source_task_ids"],
+        },
+    ),
+    Tool(
+        name="update_time_estimates_by_user",
+        description=(
+            "Set per-user time estimates on a task for the named assignees only (others untouched). "
+            "API v3, Business plan+. Max 10 per call."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "team_id": {"type": "string", "description": "Workspace/Team ID"},
+                "task_id": {"type": "string", "description": "Task ID"},
+                "estimates": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": "[{assignee: <user id int or 'unassigned'>, time: <ms, >=0>}] (max 10)",
+                },
+            },
+            "required": ["team_id", "task_id", "estimates"],
+        },
+    ),
+    Tool(
+        name="replace_time_estimates_by_user",
+        description=(
+            "REPLACE ALL per-user time estimates on a task — any estimate not re-sent is REMOVED. "
+            "RED tier: requires the confirm token. API v3, Business plan+."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "team_id": {"type": "string", "description": "Workspace/Team ID"},
+                "task_id": {"type": "string", "description": "Task ID"},
+                "estimates": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": "The FULL desired set: [{assignee, time}] (max 10). Anything omitted is wiped.",
+                },
+            },
+            "required": ["team_id", "task_id", "estimates"],
         },
     ),
     # ----- Task Checklists -----
@@ -752,6 +854,43 @@ TOOLS = [
                 "team_id": {"type": "string", "description": "Team ID (required with custom_task_ids)"},
             },
             "required": ["task_id", "file_path"],
+        },
+    ),
+    Tool(
+        name="get_attachments",
+        description=(
+            "Get attachments on a task or a Files custom field (API v3). "
+            "entity_type='tasks' (default) with entity_id=<task_id> for a task; "
+            "entity_type='custom_fields' with entity_id=<field_id> for a Files field."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "team_id": {"type": "string", "description": "Workspace/Team ID"},
+                "entity_id": {"type": "string", "description": "Task ID or Files-custom-field ID"},
+                "entity_type": {"type": "string", "description": "'tasks' (task, default) or 'custom_fields'", "default": "tasks"},
+                "cursor": {"type": "string", "description": "Pagination cursor (optional)"},
+                "limit": {"type": "integer", "description": "Page size 1-100 (default 50)"},
+            },
+            "required": ["team_id", "entity_id"],
+        },
+    ),
+    Tool(
+        name="create_attachment_v3",
+        description=(
+            "Upload a file to a task or a Files custom field (API v3). For a Files field, "
+            "follow with set_custom_field_value to associate the upload."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "team_id": {"type": "string", "description": "Workspace/Team ID"},
+                "entity_id": {"type": "string", "description": "Task ID or Files-custom-field ID"},
+                "file_path": {"type": "string", "description": "Local path to the file"},
+                "entity_type": {"type": "string", "description": "'tasks' (task, default) or 'custom_fields'", "default": "tasks"},
+                "filename": {"type": "string", "description": "Override filename"},
+            },
+            "required": ["team_id", "entity_id", "file_path"],
         },
     ),
     # ----- Custom Fields -----
@@ -1687,6 +1826,66 @@ TOOLS = [
             "required": ["team_id"],
         },
     ),
+    Tool(
+        name="get_folder_templates",
+        description="Get folder templates in a workspace (returned IDs keep their 't-' prefix)",
+        inputSchema={
+            "type": "object",
+            "properties": {"team_id": {"type": "string", "description": "Workspace/Team ID"}},
+            "required": ["team_id"],
+        },
+    ),
+    Tool(
+        name="get_list_templates",
+        description="Get list templates in a workspace (returned IDs keep their 't-' prefix)",
+        inputSchema={
+            "type": "object",
+            "properties": {"team_id": {"type": "string", "description": "Workspace/Team ID"}},
+            "required": ["team_id"],
+        },
+    ),
+    Tool(
+        name="create_folder_from_template",
+        description="Create a folder in a space from a folder template (use the full 't-' prefixed template ID)",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "space_id": {"type": "string", "description": "Space ID"},
+                "template_id": {"type": "string", "description": "Folder template ID including the 't-' prefix"},
+                "name": {"type": "string", "description": "Name for the new folder"},
+                "options": {"type": "object", "description": "Import toggles (return_immediately, include_views, old_due_date, subtasks, ...)"},
+            },
+            "required": ["space_id", "template_id", "name"],
+        },
+    ),
+    Tool(
+        name="create_list_from_template_in_folder",
+        description="Create a list in a folder from a list template (use the full 't-' prefixed template ID)",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "folder_id": {"type": "string", "description": "Folder ID"},
+                "template_id": {"type": "string", "description": "List template ID including the 't-' prefix"},
+                "name": {"type": "string", "description": "Name for the new list"},
+                "options": {"type": "object", "description": "Import toggles (return_immediately, include_views, old_due_date, subtasks, ...)"},
+            },
+            "required": ["folder_id", "template_id", "name"],
+        },
+    ),
+    Tool(
+        name="create_list_from_template_in_space",
+        description="Create a folderless list in a space from a list template (use the full 't-' prefixed template ID)",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "space_id": {"type": "string", "description": "Space ID"},
+                "template_id": {"type": "string", "description": "List template ID including the 't-' prefix"},
+                "name": {"type": "string", "description": "Name for the new list"},
+                "options": {"type": "object", "description": "Import toggles (return_immediately, include_views, old_due_date, subtasks, ...)"},
+            },
+            "required": ["space_id", "template_id", "name"],
+        },
+    ),
     # ----- Shared Hierarchy -----
     Tool(
         name="get_shared_hierarchy",
@@ -1721,8 +1920,21 @@ TOOLS = [
                 "name": {"type": "string", "description": "Doc name"},
                 "parent": {"type": "object", "description": "Optional parent: {id, type} (type: 4=space, 5=folder, 6=list, 7=everything, 12=workspace)"},
                 "visibility": {"type": "string", "description": "PUBLIC or PRIVATE (optional)"},
+                "create_page": {"type": "boolean", "description": "Create a blank starter page (API default: true; pass false to skip)"},
             },
             "required": ["team_id", "name"],
+        },
+    ),
+    Tool(
+        name="get_doc",
+        description="Get a doc's metadata: dates, parent, archived state, page defaults (API v3). 404 returns an empty object.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "team_id": {"type": "string", "description": "Workspace/Team ID"},
+                "doc_id": {"type": "string", "description": "Doc ID"},
+            },
+            "required": ["team_id", "doc_id"],
         },
     ),
     Tool(
@@ -1806,25 +2018,31 @@ TOOLS = [
     # ----- Chat (API v3) -----
     Tool(
         name="get_chat_channels",
-        description="Get chat channels including DMs (API v3). DMs list member ids only, no names.",
+        description="Get chat channels including DMs (API v3). DMs list member ids only, no names — use get_chat_channel_members to resolve.",
         inputSchema={
             "type": "object",
             "properties": {
                 "team_id": {"type": "string", "description": "Workspace/Team ID"},
                 "cursor": {"type": "string", "description": "Pagination cursor (optional)"},
+                "limit": {"type": "integer", "description": "Page size 1-100 (default 50)"},
+                "is_follower": {"type": "boolean", "description": "Only channels the caller follows"},
+                "include_closed": {"type": "boolean", "description": "Include closed DMs/group DMs"},
+                "with_message_since": {"type": "integer", "description": "Only channels with a message since this ms timestamp"},
             },
             "required": ["team_id"],
         },
     ),
     Tool(
         name="get_chat_messages",
-        description="Get messages in a chat channel (API v3)",
+        description="Get messages in a chat channel, most recent first (API v3)",
         inputSchema={
             "type": "object",
             "properties": {
                 "team_id": {"type": "string", "description": "Workspace/Team ID"},
                 "channel_id": {"type": "string", "description": "Channel ID"},
                 "cursor": {"type": "string", "description": "Pagination cursor (optional)"},
+                "limit": {"type": "integer", "description": "Page size 1-100 (default 50)"},
+                "content_format": {"type": "string", "description": "text/md (default) or text/plain"},
             },
             "required": ["team_id", "channel_id"],
         },
@@ -1841,8 +2059,17 @@ TOOLS = [
             "properties": {
                 "team_id": {"type": "string", "description": "Workspace/Team ID"},
                 "channel_id": {"type": "string", "description": "Channel ID"},
-                "content": {"type": "string", "description": "Message text (markdown)"},
+                "content": {"type": "string", "description": "Message text (max 40,000 chars)"},
                 "msg_type": {"type": "string", "description": "message (default) or post", "default": "message"},
+                "content_format": {"type": "string", "description": "text/md (default) or text/plain"},
+                "assignee": {"type": "string", "description": "Assignee user ID for the message"},
+                "group_assignee": {"type": "string", "description": "Group assignee for the message"},
+                "triaged_action": {"type": "number", "description": "Triage action (1 or 2)"},
+                "triaged_object_id": {"type": "string", "description": "Triage object ID"},
+                "triaged_object_type": {"type": "number", "description": "Triage object type"},
+                "reactions": {"type": "array", "items": {"type": "object"}, "description": "Reactions (max 10): [{date, reaction, user_id}]"},
+                "followers": {"type": "array", "items": {"type": "string"}, "description": "Follower user IDs (max 10)"},
+                "post_data": {"type": "object", "description": "Required when msg_type='post': {title, subtype: {id}}"},
             },
             "required": ["team_id", "channel_id", "content"],
         },
@@ -1856,8 +2083,258 @@ TOOLS = [
                 "team_id": {"type": "string", "description": "Workspace/Team ID"},
                 "message_id": {"type": "string", "description": "Message ID"},
                 "cursor": {"type": "string", "description": "Pagination cursor (optional)"},
+                "limit": {"type": "integer", "description": "Page size 1-100 (default 50)"},
+                "content_format": {"type": "string", "description": "text/md (default) or text/plain"},
             },
             "required": ["team_id", "message_id"],
+        },
+    ),
+    Tool(
+        name="get_chat_channel",
+        description="Get a single chat channel by ID (API v3)",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "team_id": {"type": "string", "description": "Workspace/Team ID"},
+                "channel_id": {"type": "string", "description": "Channel ID"},
+            },
+            "required": ["team_id", "channel_id"],
+        },
+    ),
+    Tool(
+        name="create_chat_channel",
+        description=(
+            "Create a chat channel (API v3). RED tier: channels are shared, team-visible structures — "
+            "requires the confirm token. If the name already exists the EXISTING channel is returned."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "team_id": {"type": "string", "description": "Workspace/Team ID"},
+                "name": {"type": "string", "description": "Channel name (acts as an upsert key)"},
+                "description": {"type": "string", "description": "Channel description"},
+                "topic": {"type": "string", "description": "Channel topic"},
+                "visibility": {"type": "string", "description": "PUBLIC (default) or PRIVATE"},
+                "user_ids": {"type": "array", "items": {"type": "string"}, "description": "Member user IDs (max 100)"},
+            },
+            "required": ["team_id", "name"],
+        },
+    ),
+    Tool(
+        name="update_chat_channel",
+        description=(
+            "Update a chat channel's name/description/topic/visibility/location (API v3). "
+            "RED tier: shared standing config — requires the confirm token."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "team_id": {"type": "string", "description": "Workspace/Team ID"},
+                "channel_id": {"type": "string", "description": "Channel ID"},
+                "name": {"type": "string", "description": "New name"},
+                "description": {"type": "string", "description": "New description"},
+                "topic": {"type": "string", "description": "New topic"},
+                "visibility": {"type": "string", "description": "PUBLIC or PRIVATE"},
+                "location": {"type": "object", "description": "New parent location: {id, type} (type: folder|list|space)"},
+                "content_format": {"type": "string", "description": "text/md (default) or text/plain"},
+            },
+            "required": ["team_id", "channel_id"],
+        },
+    ),
+    Tool(
+        name="delete_chat_channel",
+        description="Delete a chat channel (API v3). RED tier: requires the confirm token.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "team_id": {"type": "string", "description": "Workspace/Team ID"},
+                "channel_id": {"type": "string", "description": "Channel ID"},
+            },
+            "required": ["team_id", "channel_id"],
+        },
+    ),
+    Tool(
+        name="create_chat_dm_channel",
+        description=(
+            "Create (or return the existing) direct-message channel with the given users (API v3). "
+            "RED tier: opens a conversation others see — requires the confirm token. "
+            "ALWAYS pass user_ids; an empty list creates a useless self-DM."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "team_id": {"type": "string", "description": "Workspace/Team ID"},
+                "user_ids": {"type": "array", "items": {"type": "string"}, "description": "Participant user IDs (max 15, excluding yourself)"},
+            },
+            "required": ["team_id", "user_ids"],
+        },
+    ),
+    Tool(
+        name="create_chat_location_channel",
+        description=(
+            "Create (or return the existing) chat channel attached to a space/folder/list (API v3). "
+            "RED tier: shared standing config — requires the confirm token."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "team_id": {"type": "string", "description": "Workspace/Team ID"},
+                "location": {"type": "object", "description": "{id, type} — type: folder|list|space"},
+                "description": {"type": "string", "description": "Channel description"},
+                "topic": {"type": "string", "description": "Channel topic"},
+                "visibility": {"type": "string", "description": "PUBLIC (default) or PRIVATE"},
+                "user_ids": {"type": "array", "items": {"type": "string"}, "description": "Member user IDs (max 100)"},
+            },
+            "required": ["team_id", "location"],
+        },
+    ),
+    Tool(
+        name="get_chat_channel_members",
+        description="Get members of a chat channel (API v3). THE way to identify who a DM is with.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "team_id": {"type": "string", "description": "Workspace/Team ID"},
+                "channel_id": {"type": "string", "description": "Channel ID"},
+                "cursor": {"type": "string", "description": "Pagination cursor (optional)"},
+                "limit": {"type": "integer", "description": "Page size 1-100 (default 50)"},
+            },
+            "required": ["team_id", "channel_id"],
+        },
+    ),
+    Tool(
+        name="get_chat_channel_followers",
+        description="Get followers of a chat channel (API v3)",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "team_id": {"type": "string", "description": "Workspace/Team ID"},
+                "channel_id": {"type": "string", "description": "Channel ID"},
+                "cursor": {"type": "string", "description": "Pagination cursor (optional)"},
+                "limit": {"type": "integer", "description": "Page size 1-100 (default 50)"},
+            },
+            "required": ["team_id", "channel_id"],
+        },
+    ),
+    Tool(
+        name="send_chat_reply",
+        description=(
+            "Reply to a chat message (API v3). RED tier: outbound message — requires the confirm "
+            "token, only after the human approved the exact text and sending account."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "team_id": {"type": "string", "description": "Workspace/Team ID"},
+                "message_id": {"type": "string", "description": "Parent message ID"},
+                "content": {"type": "string", "description": "Reply text (max 40,000 chars)"},
+                "msg_type": {"type": "string", "description": "message (default) or post", "default": "message"},
+                "content_format": {"type": "string", "description": "text/md (default) or text/plain"},
+                "post_data": {"type": "object", "description": "Required when msg_type='post': {title, subtype: {id}}"},
+            },
+            "required": ["team_id", "message_id", "content"],
+        },
+    ),
+    Tool(
+        name="update_chat_message",
+        description=(
+            "Edit a sent chat message (API v3). RED tier: alters what others already saw — "
+            "requires the confirm token."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "team_id": {"type": "string", "description": "Workspace/Team ID"},
+                "message_id": {"type": "string", "description": "Message ID"},
+                "content": {"type": "string", "description": "New message text"},
+                "content_format": {"type": "string", "description": "text/md (default) or text/plain"},
+                "assignee": {"type": "string", "description": "Assignee user ID"},
+                "resolved": {"type": "boolean", "description": "Resolved status"},
+                "post_data": {"type": "object", "description": "Post metadata: {title, subtype: {id}}"},
+            },
+            "required": ["team_id", "message_id"],
+        },
+    ),
+    Tool(
+        name="delete_chat_message",
+        description="Delete a chat message (API v3). RED tier: requires the confirm token.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "team_id": {"type": "string", "description": "Workspace/Team ID"},
+                "message_id": {"type": "string", "description": "Message ID"},
+            },
+            "required": ["team_id", "message_id"],
+        },
+    ),
+    Tool(
+        name="get_chat_message_tagged_users",
+        description="Get users tagged (mentioned) in a chat message (API v3)",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "team_id": {"type": "string", "description": "Workspace/Team ID"},
+                "message_id": {"type": "string", "description": "Message ID"},
+                "cursor": {"type": "string", "description": "Pagination cursor (optional)"},
+                "limit": {"type": "integer", "description": "Page size 1-100 (default 50)"},
+            },
+            "required": ["team_id", "message_id"],
+        },
+    ),
+    Tool(
+        name="create_chat_reaction",
+        description=(
+            "React to a chat message with an emoji (API v3). RED tier: visible social signal from "
+            "Scott's account — requires the confirm token. reaction = lower-case emoji NAME "
+            "(e.g. 'thumbsup'), not the emoji character. 400 if already present."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "team_id": {"type": "string", "description": "Workspace/Team ID"},
+                "message_id": {"type": "string", "description": "Message ID"},
+                "reaction": {"type": "string", "description": "Lower-case emoji name"},
+            },
+            "required": ["team_id", "message_id", "reaction"],
+        },
+    ),
+    Tool(
+        name="delete_chat_reaction",
+        description="Remove a reaction (by emoji name) from a chat message (API v3). RED tier: requires the confirm token.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "team_id": {"type": "string", "description": "Workspace/Team ID"},
+                "message_id": {"type": "string", "description": "Message ID"},
+                "reaction": {"type": "string", "description": "Lower-case emoji name to remove"},
+            },
+            "required": ["team_id", "message_id", "reaction"],
+        },
+    ),
+    Tool(
+        name="get_chat_message_reactions",
+        description="Get reactions on a chat message (API v3)",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "team_id": {"type": "string", "description": "Workspace/Team ID"},
+                "message_id": {"type": "string", "description": "Message ID"},
+                "cursor": {"type": "string", "description": "Pagination cursor (optional)"},
+                "limit": {"type": "integer", "description": "Page size 1-100 (default 50)"},
+            },
+            "required": ["team_id", "message_id"],
+        },
+    ),
+    Tool(
+        name="get_chat_post_subtypes",
+        description="Get post subtype IDs (Announcement/Discussion/Idea/Update) needed to send a chat 'post' (API v3)",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "team_id": {"type": "string", "description": "Workspace/Team ID"},
+                "comment_type": {"type": "string", "description": "post (default) | ai | syncup | ai_via_brain", "default": "post"},
+            },
+            "required": ["team_id"],
         },
     ),
 ]
@@ -1946,10 +2423,17 @@ async def execute_tool(client: ClickUpClient, name: str, args: dict[str, Any]) -
     elif name == "get_tasks":
         return await client.get_tasks(**args)
     elif name == "create_task":
+        # Back-compat: the documented body param is markdown_content.
+        if "markdown_description" in args and "markdown_content" not in args:
+            args["markdown_content"] = args.pop("markdown_description")
+        args.pop("markdown_description", None)
         return await client.create_task(args["list_id"], args["name"], **{k: v for k, v in args.items() if k not in ["list_id", "name"]})
     elif name == "get_task":
         return await client.get_task(**args)
     elif name == "update_task":
+        if "markdown_description" in args and "markdown_content" not in args:
+            args["markdown_content"] = args.pop("markdown_description")
+        args.pop("markdown_description", None)
         task_id = args.pop("task_id")
         custom_task_ids = args.pop("custom_task_ids", False)
         team_id = args.pop("team_id", None)
@@ -1964,6 +2448,21 @@ async def execute_tool(client: ClickUpClient, name: str, args: dict[str, Any]) -
         return await client.get_bulk_tasks_time_in_status(args["task_ids"], args.get("custom_task_ids", False), args.get("team_id"))
     elif name == "create_task_from_template":
         return await client.create_task_from_template(args["list_id"], args["template_id"], args["name"])
+    elif name == "move_task":
+        return await client.move_task(
+            args["team_id"],
+            args["task_id"],
+            args["list_id"],
+            args.get("move_custom_fields"),
+            args.get("custom_fields_to_move"),
+            args.get("status_mappings"),
+        )
+    elif name == "merge_tasks":
+        return await client.merge_tasks(args["task_id"], args["source_task_ids"])
+    elif name == "update_time_estimates_by_user":
+        return await client.update_time_estimates_by_user(args["team_id"], args["task_id"], args["estimates"])
+    elif name == "replace_time_estimates_by_user":
+        return await client.replace_time_estimates_by_user(args["team_id"], args["task_id"], args["estimates"])
 
     # Checklists
     elif name == "create_checklist":
@@ -2051,6 +2550,22 @@ async def execute_tool(client: ClickUpClient, name: str, args: dict[str, Any]) -
             args.get("filename"),
             args.get("custom_task_ids", False),
             args.get("team_id"),
+        )
+    elif name == "get_attachments":
+        return await client.get_attachments(
+            args["team_id"],
+            args["entity_id"],
+            args.get("entity_type", "tasks"),
+            args.get("cursor"),
+            args.get("limit"),
+        )
+    elif name == "create_attachment_v3":
+        return await client.create_attachment_v3(
+            args["team_id"],
+            args["entity_id"],
+            args["file_path"],
+            args.get("entity_type", "tasks"),
+            args.get("filename"),
         )
 
     # Custom Fields
@@ -2303,6 +2818,16 @@ async def execute_tool(client: ClickUpClient, name: str, args: dict[str, Any]) -
     # Templates
     elif name == "get_task_templates":
         return await client.get_task_templates(args["team_id"], args.get("page", 0))
+    elif name == "get_folder_templates":
+        return await client.get_folder_templates(args["team_id"])
+    elif name == "get_list_templates":
+        return await client.get_list_templates(args["team_id"])
+    elif name == "create_folder_from_template":
+        return await client.create_folder_from_template(args["space_id"], args["template_id"], args["name"], args.get("options"))
+    elif name == "create_list_from_template_in_folder":
+        return await client.create_list_from_template_in_folder(args["folder_id"], args["template_id"], args["name"], args.get("options"))
+    elif name == "create_list_from_template_in_space":
+        return await client.create_list_from_template_in_space(args["space_id"], args["template_id"], args["name"], args.get("options"))
 
     # Shared Hierarchy
     elif name == "get_shared_hierarchy":
@@ -2312,7 +2837,9 @@ async def execute_tool(client: ClickUpClient, name: str, args: dict[str, Any]) -
     elif name == "search_docs":
         return await client.search_docs(args["team_id"], args.get("query"), args.get("cursor"))
     elif name == "create_doc":
-        return await client.create_doc(args["team_id"], args["name"], args.get("parent"), args.get("visibility"))
+        return await client.create_doc(args["team_id"], args["name"], args.get("parent"), args.get("visibility"), args.get("create_page"))
+    elif name == "get_doc":
+        return await client.get_doc(args["team_id"], args["doc_id"])
     elif name == "get_doc_page_listing":
         return await client.get_doc_page_listing(args["team_id"], args["doc_id"])
     elif name == "get_doc_pages":
@@ -2333,13 +2860,72 @@ async def execute_tool(client: ClickUpClient, name: str, args: dict[str, Any]) -
 
     # Chat (API v3)
     elif name == "get_chat_channels":
-        return await client.get_chat_channels(args["team_id"], args.get("cursor"))
+        return await client.get_chat_channels(
+            args["team_id"],
+            args.get("cursor"),
+            args.get("limit"),
+            args.get("is_follower"),
+            args.get("include_closed"),
+            args.get("with_message_since"),
+        )
+    elif name == "get_chat_channel":
+        return await client.get_chat_channel(args["team_id"], args["channel_id"])
+    elif name == "create_chat_channel":
+        team_id = args.pop("team_id")
+        channel_name = args.pop("name")
+        return await client.create_chat_channel(team_id, channel_name, **args)
+    elif name == "update_chat_channel":
+        team_id = args.pop("team_id")
+        channel_id = args.pop("channel_id")
+        return await client.update_chat_channel(team_id, channel_id, **args)
+    elif name == "delete_chat_channel":
+        return await client.delete_chat_channel(args["team_id"], args["channel_id"])
+    elif name == "create_chat_dm_channel":
+        return await client.create_chat_dm_channel(args["team_id"], args["user_ids"])
+    elif name == "create_chat_location_channel":
+        team_id = args.pop("team_id")
+        location = args.pop("location")
+        return await client.create_chat_location_channel(team_id, location, **args)
+    elif name == "get_chat_channel_members":
+        return await client.get_chat_channel_members(args["team_id"], args["channel_id"], args.get("cursor"), args.get("limit"))
+    elif name == "get_chat_channel_followers":
+        return await client.get_chat_channel_followers(args["team_id"], args["channel_id"], args.get("cursor"), args.get("limit"))
     elif name == "get_chat_messages":
-        return await client.get_chat_messages(args["team_id"], args["channel_id"], args.get("cursor"))
+        return await client.get_chat_messages(
+            args["team_id"], args["channel_id"], args.get("cursor"), args.get("limit"), args.get("content_format")
+        )
     elif name == "send_chat_message":
-        return await client.send_chat_message(args["team_id"], args["channel_id"], args["content"], args.get("msg_type", "message"))
+        team_id = args.pop("team_id")
+        channel_id = args.pop("channel_id")
+        content = args.pop("content")
+        msg_type = args.pop("msg_type", "message")
+        return await client.send_chat_message(team_id, channel_id, content, msg_type, **args)
+    elif name == "send_chat_reply":
+        team_id = args.pop("team_id")
+        message_id = args.pop("message_id")
+        content = args.pop("content")
+        msg_type = args.pop("msg_type", "message")
+        return await client.send_chat_reply(team_id, message_id, content, msg_type, **args)
+    elif name == "update_chat_message":
+        team_id = args.pop("team_id")
+        message_id = args.pop("message_id")
+        return await client.update_chat_message(team_id, message_id, **args)
+    elif name == "delete_chat_message":
+        return await client.delete_chat_message(args["team_id"], args["message_id"])
     elif name == "get_chat_message_replies":
-        return await client.get_chat_message_replies(args["team_id"], args["message_id"], args.get("cursor"))
+        return await client.get_chat_message_replies(
+            args["team_id"], args["message_id"], args.get("cursor"), args.get("limit"), args.get("content_format")
+        )
+    elif name == "get_chat_message_tagged_users":
+        return await client.get_chat_message_tagged_users(args["team_id"], args["message_id"], args.get("cursor"), args.get("limit"))
+    elif name == "create_chat_reaction":
+        return await client.create_chat_reaction(args["team_id"], args["message_id"], args["reaction"])
+    elif name == "delete_chat_reaction":
+        return await client.delete_chat_reaction(args["team_id"], args["message_id"], args["reaction"])
+    elif name == "get_chat_message_reactions":
+        return await client.get_chat_message_reactions(args["team_id"], args["message_id"], args.get("cursor"), args.get("limit"))
+    elif name == "get_chat_post_subtypes":
+        return await client.get_chat_post_subtypes(args["team_id"], args.get("comment_type", "post"))
 
     else:
         raise ValueError(f"Unknown tool: {name}")

@@ -34,8 +34,24 @@ RED_TOOLS = {
     "create_webhook",
     "update_webhook",
     "delete_webhook",
+    # Destructive task operations: merge cannot be undone; move can clobber
+    # statuses/custom fields via remapping; replace wipes estimates not re-sent.
+    "merge_tasks",
+    "move_task",
+    "replace_time_estimates_by_user",
     # Outbound messaging: human must approve the exact text + account first.
     "send_chat_message",
+    "send_chat_reply",
+    "update_chat_message",
+    "delete_chat_message",
+    "create_chat_reaction",
+    "delete_chat_reaction",
+    # Chat standing config: channels are shared, visible-to-others structures.
+    "create_chat_channel",
+    "create_chat_dm_channel",
+    "create_chat_location_channel",
+    "update_chat_channel",
+    "delete_chat_channel",
 }
 
 # Workspace access control: always blocked (human-only).

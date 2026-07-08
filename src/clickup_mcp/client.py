@@ -58,10 +58,11 @@ class ClickUpClient:
         # Handle file uploads differently
         if files:
             headers = {"Authorization": self.api_token}
+            upload_url = endpoint if endpoint.startswith("http") else f"{self.BASE_URL}{endpoint}"
             async with httpx.AsyncClient(timeout=60.0) as upload_client:
                 response = await upload_client.request(
                     method=method,
-                    url=f"{self.BASE_URL}{endpoint}",
+                    url=upload_url,
                     headers=headers,
                     params=params,
                     files=files,
@@ -240,9 +241,16 @@ class ClickUpClient:
         date_created_lt: Optional[int] = None,
         date_updated_gt: Optional[int] = None,
         date_updated_lt: Optional[int] = None,
+        date_done_gt: Optional[int] = None,
+        date_done_lt: Optional[int] = None,
         custom_fields: Optional[list[dict]] = None,
+        custom_items: Optional[list[int]] = None,
+        watchers: Optional[list[str]] = None,
+        include_timl: bool = False,
     ) -> dict:
         """Get tasks in a list."""
+        import json as _json
+
         params = {
             "archived": str(archived).lower(),
             "include_closed": str(include_closed).lower(),
@@ -251,12 +259,16 @@ class ClickUpClient:
             "subtasks": str(subtasks).lower(),
             "include_markdown_description": str(include_markdown_description).lower(),
         }
+        if include_timl:
+            params["include_timl"] = "true"
         if order_by:
             params["order_by"] = order_by
         if statuses:
             params["statuses[]"] = statuses
         if assignees:
             params["assignees[]"] = assignees
+        if watchers:
+            params["watchers[]"] = watchers
         if tags:
             params["tags[]"] = tags
         if due_date_gt:
@@ -271,8 +283,15 @@ class ClickUpClient:
             params["date_updated_gt"] = date_updated_gt
         if date_updated_lt:
             params["date_updated_lt"] = date_updated_lt
+        if date_done_gt:
+            params["date_done_gt"] = date_done_gt
+        if date_done_lt:
+            params["date_done_lt"] = date_done_lt
         if custom_fields:
-            params["custom_fields"] = custom_fields
+            # API expects a JSON-encoded array of {field_id, operator, value} in the query string
+            params["custom_fields"] = _json.dumps(custom_fields)
+        if custom_items:
+            params["custom_items[]"] = custom_items
 
         return await self.get(f"/list/{list_id}/task", params=params)
 
@@ -344,10 +363,17 @@ class ClickUpClient:
         date_created_lt: Optional[int] = None,
         date_updated_gt: Optional[int] = None,
         date_updated_lt: Optional[int] = None,
+        date_done_gt: Optional[int] = None,
+        date_done_lt: Optional[int] = None,
+        parent: Optional[str] = None,
+        include_markdown_description: bool = False,
         custom_fields: Optional[list[dict]] = None,
+        custom_items: Optional[list[int]] = None,
         **kwargs,
     ) -> dict:
         """Get filtered tasks across a workspace."""
+        import json as _json
+
         params = {
             "page": page,
             "reverse": str(reverse).lower(),
@@ -355,6 +381,8 @@ class ClickUpClient:
             "include_closed": str(include_closed).lower(),
             **kwargs,
         }
+        if include_markdown_description:
+            params["include_markdown_description"] = "true"
         if order_by:
             params["order_by"] = order_by
         if space_ids:
@@ -381,6 +409,17 @@ class ClickUpClient:
             params["date_updated_gt"] = date_updated_gt
         if date_updated_lt:
             params["date_updated_lt"] = date_updated_lt
+        if date_done_gt:
+            params["date_done_gt"] = date_done_gt
+        if date_done_lt:
+            params["date_done_lt"] = date_done_lt
+        if parent:
+            params["parent"] = parent
+        if custom_fields:
+            # API expects the SINGULAR key custom_fields holding a JSON-encoded array
+            params["custom_fields"] = _json.dumps(custom_fields)
+        if custom_items:
+            params["custom_items[]"] = custom_items
 
         return await self.get(f"/team/{team_id}/task", params=params)
 
@@ -421,6 +460,47 @@ class ClickUpClient:
         return await self.post(
             f"/list/{list_id}/taskTemplate/{template_id}",
             json={"name": name},
+        )
+
+    async def move_task(
+        self,
+        team_id: str,
+        task_id: str,
+        list_id: str,
+        move_custom_fields: Optional[bool] = None,
+        custom_fields_to_move: Optional[list[str]] = None,
+        status_mappings: Optional[list[dict]] = None,
+    ) -> dict:
+        """Move a task to a new home list (API v3)."""
+        data: dict[str, Any] = {}
+        if move_custom_fields is not None:
+            data["move_custom_fields"] = move_custom_fields
+        if custom_fields_to_move:
+            data["custom_fields_to_move"] = custom_fields_to_move
+        if status_mappings:
+            data["status_mappings"] = status_mappings
+        return await self.put(
+            f"{self.V3_URL}/workspaces/{team_id}/tasks/{task_id}/home_list/{list_id}",
+            json=data,
+        )
+
+    async def merge_tasks(self, task_id: str, source_task_ids: list[str]) -> dict:
+        """Merge source tasks INTO the target task (target survives). Custom task IDs not supported."""
+        return await self.post(f"/task/{task_id}/merge", json={"source_task_ids": source_task_ids})
+
+    async def update_time_estimates_by_user(self, team_id: str, task_id: str, estimates: list[dict]) -> dict:
+        """Set per-user time estimates for the named assignees only (API v3, Business plan+). Body is a bare array."""
+        return await self._request(
+            "PATCH",
+            f"{self.V3_URL}/workspaces/{team_id}/tasks/{task_id}/time_estimates_by_user",
+            json=estimates,
+        )
+
+    async def replace_time_estimates_by_user(self, team_id: str, task_id: str, estimates: list[dict]) -> dict:
+        """REPLACE all per-user time estimates; any estimate not in the list is removed (API v3, Business plan+)."""
+        return await self.put(
+            f"{self.V3_URL}/workspaces/{team_id}/tasks/{task_id}/time_estimates_by_user",
+            json=estimates,
         )
 
     # ===== Task Checklists =====
@@ -690,6 +770,53 @@ class ClickUpClient:
         with open(file_path, "rb") as f:
             files = {"attachment": (filename, f)}
             return await self.post(f"/task/{task_id}/attachment", files=files, params=params)
+
+    async def get_attachments(
+        self,
+        team_id: str,
+        entity_id: str,
+        entity_type: str = "tasks",
+        cursor: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> dict:
+        """Get attachments on a task or Files custom field (API v3).
+
+        entity_type='tasks' + entity_id=<task_id> for a task;
+        entity_type='custom_fields' + entity_id=<field_id> for a Files custom field.
+        NOTE: ClickUp's reference doc claims 'attachments' as the task entity type —
+        live-tested 2026-07-08: 'attachments' 404s, 'tasks' works."""
+        params: dict[str, Any] = {}
+        if cursor:
+            params["cursor"] = cursor
+        if limit:
+            params["limit"] = limit
+        return await self.get(
+            f"{self.V3_URL}/workspaces/{team_id}/{entity_type}/{entity_id}/attachments",
+            params=params,
+        )
+
+    async def create_attachment_v3(
+        self,
+        team_id: str,
+        entity_id: str,
+        file_path: str,
+        entity_type: str = "tasks",
+        filename: Optional[str] = None,
+    ) -> dict:
+        """Upload an attachment to a task or Files custom field (API v3, multipart).
+
+        Live-tested 2026-07-08: entity_type must be 'tasks' (docs wrongly say
+        'attachments') and the multipart field name must be 'attachment'."""
+        import os
+
+        if not filename:
+            filename = os.path.basename(file_path)
+        with open(file_path, "rb") as f:
+            files = {"attachment": (filename, f)}
+            return await self.post(
+                f"{self.V3_URL}/workspaces/{team_id}/{entity_type}/{entity_id}/attachments",
+                files=files,
+            )
 
     # ===== Custom Fields =====
 
@@ -1270,6 +1397,53 @@ class ClickUpClient:
         """Get task templates in a workspace."""
         return await self.get(f"/team/{team_id}/taskTemplate", params={"page": page})
 
+    async def get_folder_templates(self, team_id: str) -> dict:
+        """Get folder templates in a workspace (IDs come back with a 't-' prefix — keep it)."""
+        return await self.get(f"/team/{team_id}/folder_template")
+
+    async def get_list_templates(self, team_id: str) -> dict:
+        """Get list templates in a workspace (IDs come back with a 't-' prefix — keep it)."""
+        return await self.get(f"/team/{team_id}/list_template")
+
+    async def create_folder_from_template(
+        self,
+        space_id: str,
+        template_id: str,
+        name: str,
+        options: Optional[dict] = None,
+    ) -> dict:
+        """Create a folder in a space from a folder template (template_id keeps its 't-' prefix)."""
+        data: dict[str, Any] = {"name": name}
+        if options:
+            data["options"] = options
+        return await self.post(f"/space/{space_id}/folder_template/{template_id}", json=data)
+
+    async def create_list_from_template_in_folder(
+        self,
+        folder_id: str,
+        template_id: str,
+        name: str,
+        options: Optional[dict] = None,
+    ) -> dict:
+        """Create a list in a folder from a list template (template_id keeps its 't-' prefix)."""
+        data: dict[str, Any] = {"name": name}
+        if options:
+            data["options"] = options
+        return await self.post(f"/folder/{folder_id}/list_template/{template_id}", json=data)
+
+    async def create_list_from_template_in_space(
+        self,
+        space_id: str,
+        template_id: str,
+        name: str,
+        options: Optional[dict] = None,
+    ) -> dict:
+        """Create a folderless list in a space from a list template (template_id keeps its 't-' prefix)."""
+        data: dict[str, Any] = {"name": name}
+        if options:
+            data["options"] = options
+        return await self.post(f"/space/{space_id}/list_template/{template_id}", json=data)
+
     # ===== Shared Hierarchy =====
 
     async def get_shared_hierarchy(self, team_id: str) -> dict:
@@ -1284,14 +1458,27 @@ class ClickUpClient:
         """Search docs in a workspace."""
         return await self.get(f"{self.V3_URL}/workspaces/{team_id}/docs", params={"search": query, "next_cursor": cursor})
 
-    async def create_doc(self, team_id: str, name: str, parent: Optional[dict] = None, visibility: Optional[str] = None) -> dict:
-        """Create a doc."""
+    async def create_doc(
+        self,
+        team_id: str,
+        name: str,
+        parent: Optional[dict] = None,
+        visibility: Optional[str] = None,
+        create_page: Optional[bool] = None,
+    ) -> dict:
+        """Create a doc. create_page defaults to true API-side (blank starter page); pass False to suppress it."""
         data: dict[str, Any] = {"name": name}
         if parent:
             data["parent"] = parent
         if visibility:
             data["visibility"] = visibility
+        if create_page is not None:
+            data["create_page"] = create_page
         return await self.post(f"{self.V3_URL}/workspaces/{team_id}/docs", json=data)
+
+    async def get_doc(self, team_id: str, doc_id: str) -> dict:
+        """Get a doc's metadata (creation dates, parent, archived state, page defaults)."""
+        return await self.get(f"{self.V3_URL}/workspaces/{team_id}/docs/{doc_id}")
 
     async def get_doc_page_listing(self, team_id: str, doc_id: str) -> dict:
         """Get the page tree (ids + names, no content) of a doc."""
@@ -1346,21 +1533,177 @@ class ClickUpClient:
 
     # ===== Chat (API v3) =====
 
-    async def get_chat_channels(self, team_id: str, cursor: Optional[str] = None) -> dict:
+    async def get_chat_channels(
+        self,
+        team_id: str,
+        cursor: Optional[str] = None,
+        limit: Optional[int] = None,
+        is_follower: Optional[bool] = None,
+        include_closed: Optional[bool] = None,
+        with_message_since: Optional[int] = None,
+    ) -> dict:
         """Get chat channels (incl. DMs) in a workspace."""
-        return await self.get(f"{self.V3_URL}/workspaces/{team_id}/chat/channels", params={"next_cursor": cursor})
+        params: dict[str, Any] = {"cursor": cursor}
+        if limit:
+            params["limit"] = limit
+        if is_follower is not None:
+            params["is_follower"] = str(is_follower).lower()
+        if include_closed is not None:
+            params["include_closed"] = str(include_closed).lower()
+        if with_message_since:
+            params["with_message_since"] = with_message_since
+        return await self.get(f"{self.V3_URL}/workspaces/{team_id}/chat/channels", params=params)
 
-    async def get_chat_messages(self, team_id: str, channel_id: str, cursor: Optional[str] = None) -> dict:
-        """Get messages in a chat channel."""
-        return await self.get(f"{self.V3_URL}/workspaces/{team_id}/chat/channels/{channel_id}/messages", params={"next_cursor": cursor})
+    async def get_chat_channel(self, team_id: str, channel_id: str) -> dict:
+        """Get a single chat channel."""
+        return await self.get(f"{self.V3_URL}/workspaces/{team_id}/chat/channels/{channel_id}")
 
-    async def send_chat_message(self, team_id: str, channel_id: str, content: str, msg_type: str = "message") -> dict:
-        """Send a message to a chat channel."""
-        return await self.post(
-            f"{self.V3_URL}/workspaces/{team_id}/chat/channels/{channel_id}/messages",
-            json={"type": msg_type, "content": content},
+    async def create_chat_channel(self, team_id: str, name: str, **kwargs) -> dict:
+        """Create a chat channel (returns the EXISTING channel if the name is taken)."""
+        return await self.post(f"{self.V3_URL}/workspaces/{team_id}/chat/channels", json={"name": name, **kwargs})
+
+    async def update_chat_channel(self, team_id: str, channel_id: str, **kwargs) -> dict:
+        """Update a chat channel (PATCH: send only fields to change)."""
+        return await self._request(
+            "PATCH", f"{self.V3_URL}/workspaces/{team_id}/chat/channels/{channel_id}", json=kwargs
         )
 
-    async def get_chat_message_replies(self, team_id: str, message_id: str, cursor: Optional[str] = None) -> dict:
+    async def delete_chat_channel(self, team_id: str, channel_id: str) -> dict:
+        """Delete a chat channel."""
+        return await self.delete(f"{self.V3_URL}/workspaces/{team_id}/chat/channels/{channel_id}")
+
+    async def create_chat_dm_channel(self, team_id: str, user_ids: list[str]) -> dict:
+        """Create (or return the existing) DM channel with the given users (max 15)."""
+        return await self.post(
+            f"{self.V3_URL}/workspaces/{team_id}/chat/channels/direct_message",
+            json={"user_ids": user_ids},
+        )
+
+    async def create_chat_location_channel(self, team_id: str, location: dict, **kwargs) -> dict:
+        """Create (or return the existing) channel on a space/folder/list. location={id, type}."""
+        return await self.post(
+            f"{self.V3_URL}/workspaces/{team_id}/chat/channels/location",
+            json={"location": location, **kwargs},
+        )
+
+    async def get_chat_channel_members(
+        self, team_id: str, channel_id: str, cursor: Optional[str] = None, limit: Optional[int] = None
+    ) -> dict:
+        """Get members of a chat channel."""
+        params: dict[str, Any] = {"cursor": cursor}
+        if limit:
+            params["limit"] = limit
+        return await self.get(
+            f"{self.V3_URL}/workspaces/{team_id}/chat/channels/{channel_id}/members", params=params
+        )
+
+    async def get_chat_channel_followers(
+        self, team_id: str, channel_id: str, cursor: Optional[str] = None, limit: Optional[int] = None
+    ) -> dict:
+        """Get followers of a chat channel."""
+        params: dict[str, Any] = {"cursor": cursor}
+        if limit:
+            params["limit"] = limit
+        return await self.get(
+            f"{self.V3_URL}/workspaces/{team_id}/chat/channels/{channel_id}/followers", params=params
+        )
+
+    async def get_chat_messages(
+        self,
+        team_id: str,
+        channel_id: str,
+        cursor: Optional[str] = None,
+        limit: Optional[int] = None,
+        content_format: Optional[str] = None,
+    ) -> dict:
+        """Get messages in a chat channel (most recent first)."""
+        params: dict[str, Any] = {"cursor": cursor}
+        if limit:
+            params["limit"] = limit
+        if content_format:
+            params["content_format"] = content_format
+        return await self.get(
+            f"{self.V3_URL}/workspaces/{team_id}/chat/channels/{channel_id}/messages", params=params
+        )
+
+    async def send_chat_message(self, team_id: str, channel_id: str, content: str, msg_type: str = "message", **kwargs) -> dict:
+        """Send a message to a chat channel. Extra kwargs pass through to the documented body
+        (content_format, assignee, group_assignee, triaged_*, reactions, followers, post_data)."""
+        return await self.post(
+            f"{self.V3_URL}/workspaces/{team_id}/chat/channels/{channel_id}/messages",
+            json={"type": msg_type, "content": content, **kwargs},
+        )
+
+    async def send_chat_reply(self, team_id: str, message_id: str, content: str, msg_type: str = "message", **kwargs) -> dict:
+        """Reply to a chat message."""
+        return await self.post(
+            f"{self.V3_URL}/workspaces/{team_id}/chat/messages/{message_id}/replies",
+            json={"type": msg_type, "content": content, **kwargs},
+        )
+
+    async def update_chat_message(self, team_id: str, message_id: str, **kwargs) -> dict:
+        """Edit a chat message (PATCH: content, content_format, assignee, resolved, post_data)."""
+        return await self._request(
+            "PATCH", f"{self.V3_URL}/workspaces/{team_id}/chat/messages/{message_id}", json=kwargs
+        )
+
+    async def delete_chat_message(self, team_id: str, message_id: str) -> dict:
+        """Delete a chat message."""
+        return await self.delete(f"{self.V3_URL}/workspaces/{team_id}/chat/messages/{message_id}")
+
+    async def get_chat_message_replies(
+        self,
+        team_id: str,
+        message_id: str,
+        cursor: Optional[str] = None,
+        limit: Optional[int] = None,
+        content_format: Optional[str] = None,
+    ) -> dict:
         """Get replies to a chat message."""
-        return await self.get(f"{self.V3_URL}/workspaces/{team_id}/chat/messages/{message_id}/replies", params={"next_cursor": cursor})
+        params: dict[str, Any] = {"cursor": cursor}
+        if limit:
+            params["limit"] = limit
+        if content_format:
+            params["content_format"] = content_format
+        return await self.get(
+            f"{self.V3_URL}/workspaces/{team_id}/chat/messages/{message_id}/replies", params=params
+        )
+
+    async def get_chat_message_tagged_users(
+        self, team_id: str, message_id: str, cursor: Optional[str] = None, limit: Optional[int] = None
+    ) -> dict:
+        """Get users tagged (mentioned) in a chat message."""
+        params: dict[str, Any] = {"cursor": cursor}
+        if limit:
+            params["limit"] = limit
+        return await self.get(
+            f"{self.V3_URL}/workspaces/{team_id}/chat/messages/{message_id}/tagged_users", params=params
+        )
+
+    async def create_chat_reaction(self, team_id: str, message_id: str, reaction: str) -> dict:
+        """React to a chat message (reaction = lower-case emoji name; 400 if duplicate)."""
+        return await self.post(
+            f"{self.V3_URL}/workspaces/{team_id}/chat/messages/{message_id}/reactions",
+            json={"reaction": reaction},
+        )
+
+    async def delete_chat_reaction(self, team_id: str, message_id: str, reaction: str) -> dict:
+        """Remove a reaction (by emoji name) from a chat message."""
+        return await self.delete(
+            f"{self.V3_URL}/workspaces/{team_id}/chat/messages/{message_id}/reactions/{reaction}"
+        )
+
+    async def get_chat_message_reactions(
+        self, team_id: str, message_id: str, cursor: Optional[str] = None, limit: Optional[int] = None
+    ) -> dict:
+        """Get reactions on a chat message."""
+        params: dict[str, Any] = {"cursor": cursor}
+        if limit:
+            params["limit"] = limit
+        return await self.get(
+            f"{self.V3_URL}/workspaces/{team_id}/chat/messages/{message_id}/reactions", params=params
+        )
+
+    async def get_chat_post_subtypes(self, team_id: str, comment_type: str = "post") -> dict:
+        """Get post subtype IDs (Announcement/Discussion/Idea/Update) for chat 'post' messages."""
+        return await self.get(f"{self.V3_URL}/workspaces/{team_id}/comments/types/{comment_type}/subtypes")
