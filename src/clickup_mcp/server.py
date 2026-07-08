@@ -2578,10 +2578,24 @@ async def execute_tool(client: ClickUpClient, name: str, args: dict[str, Any]) -
     elif name == "get_workspace_custom_fields":
         return await client.get_workspace_custom_fields(args["team_id"])
     elif name == "set_custom_field_value":
+        value = args["value"]
+        # Clients sometimes deliver the untyped `value` as a JSON string
+        # (e.g. '["uuid"]' for a labels field). ClickUp then rejects it with
+        # "Value must be an array". If the string parses as JSON structure,
+        # unwrap it; plain strings (text fields, "3" for emoji) pass through.
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped[:1] in ("[", "{"):
+                import json as _json
+
+                try:
+                    value = _json.loads(stripped)
+                except ValueError:
+                    pass
         return await client.set_custom_field_value(
             args["task_id"],
             args["field_id"],
-            args["value"],
+            value,
             args.get("custom_task_ids", False),
             args.get("team_id"),
         )
