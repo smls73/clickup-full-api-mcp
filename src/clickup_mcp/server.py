@@ -1,12 +1,16 @@
 """ClickUp MCP Server - Comprehensive API coverage."""
 
 import json
+import os
+import stat
+from pathlib import PureWindowsPath
 from typing import Any
 
 from mcp.server import Server
 from mcp.types import TextContent, Tool
 
 from .client import ClickUpClient
+from .rich_text import comment_body
 from .safety import SafetyError, check as safety_check
 
 # Initialize server
@@ -23,6 +27,146 @@ def get_client() -> ClickUpClient:
         _client = ClickUpClient()
     return _client
 
+
+# ===== Doc page text from a local file (content_file) =====
+# Long pages (the Meeting Filing Log is about 77,000 characters) are sent from a file,
+# byte for byte, so the text is never retyped by a model on the way through.
+
+CONTENT_FILE_ROOTS = (
+    r"I:\My Drive\TeamIS\_Systems",
+    r"C:\Users\smls8\.claude\data",
+    r"G:\My Drive\Nuage HQ",
+)
+# 1 MiB: about 13 times the largest real page today, and small enough that a wrong path
+# (a log, an export, a binary) is refused instead of pushed into a doc page.
+CONTENT_FILE_MAX_BYTES = 1024 * 1024
+
+CONTENT_FILE_DESC = (
+    "Absolute path to a local UTF-8 text file (no byte order mark) whose exact text becomes "
+    "the page content. An alternative to content, never both. The file must sit under "
+    r"I:\My Drive\TeamIS\_Systems\, C:\Users\smls8\.claude\data\ or G:\My Drive\Nuage HQ\, be at most 1 MiB, "
+    "and not be reached through a link or junction."
+)
+
+
+def _refuse(msg: str) -> ValueError:
+    return ValueError(f"content_file refused: {msg}")
+
+
+def read_content_file(raw: Any) -> str:
+    """Return the exact text of an allowed local file, or raise ValueError saying why not."""
+    roots = ", ".join(r + "\\" for r in CONTENT_FILE_ROOTS)
+    if not isinstance(raw, str) or not raw:
+        raise _refuse("it must be a non-empty absolute path string.")
+    if raw.startswith(("\\\\", "//")):
+        raise _refuse(f"network and device paths are not accepted ({raw}). Use a path under {roots}.")
+    pure = PureWindowsPath(raw)
+    if not (pure.drive and pure.root) or ":" in raw[2:]:
+        raise _refuse(f"it must be an absolute path such as C:\\folder\\file.md ({raw}).")
+    if ".." in pure.parts:
+        raise _refuse(f"'..' is not accepted in the path ({raw}). Give the direct path.")
+    typed = os.path.normcase(os.path.normpath(raw))
+    norm_roots = [os.path.normcase(os.path.normpath(r)) for r in CONTENT_FILE_ROOTS]
+    if typed in norm_roots:
+        raise _refuse(f"{raw} is an allowed folder, not a file. Give the path of a file inside it.")
+    under = [r for r in norm_roots if typed.startswith(r + os.sep)]
+    if not under:
+        raise _refuse(f"{raw} is outside the allowed folders. Save the file under {roots} and retry.")
+    try:
+        real = os.path.realpath(raw, strict=True)
+    except FileNotFoundError:
+        raise _refuse(f"file not found: {raw}") from None
+    except OSError as e:
+        raise _refuse(f"cannot open {raw} ({e.strerror or type(e).__name__}). Check the path and permissions.") from None
+    if os.path.normcase(real) != typed:
+        raise _refuse(f"{raw} is reached through a link, junction, or short name (it resolves to {real}). "
+                      "Give the file's real path.")
+    try:
+        rel = PureWindowsPath(typed[len(under[0]) + 1:]).parts
+        step = under[0]
+        for part in rel:  # every folder and the file itself below the allowed root
+            step = os.path.join(step, part)
+            if os.lstat(step).st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+                raise _refuse(f"{step} is a link or junction. Give a path with none.")
+        info = os.stat(real)
+        if not stat.S_ISREG(info.st_mode):
+            raise _refuse(f"{raw} is not a regular file.")
+        # A hard link is a second name for a file that may live outside the allowed folders.
+        # (Google Drive's I: mount reports 0 links, so only a count above 1 is refused.)
+        if info.st_nlink > 1:
+            raise _refuse(f"{raw} is a hard link ({info.st_nlink} names for one file). Copy the text to a plain file.")
+        if info.st_size > CONTENT_FILE_MAX_BYTES:
+            raise _refuse(f"{raw} is {info.st_size:,} bytes; the limit is {CONTENT_FILE_MAX_BYTES:,} bytes (1 MiB). "
+                          "Split the page or trim the file.")
+        with open(real, "rb") as f:
+            data = f.read(CONTENT_FILE_MAX_BYTES + 1)
+    except OSError as e:
+        raise _refuse(f"cannot read {raw} ({e.strerror or type(e).__name__}). Check the path and permissions.") from None
+    if len(data) > CONTENT_FILE_MAX_BYTES:
+        raise _refuse(f"{raw} grew past {CONTENT_FILE_MAX_BYTES:,} bytes while being read.")
+    if data.startswith(b"\xef\xbb\xbf"):
+        raise _refuse(f"{raw} starts with a UTF-8 byte order mark, which would be sent as an invisible "
+                      "character. Save it as UTF-8 without a byte order mark and retry.")
+    try:
+        return data.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as e:
+        raise _refuse(f"{raw} is not valid UTF-8 (first bad byte at offset {e.start}). "
+                      "Save it as UTF-8 and retry.") from None
+
+
+def page_content(args: dict[str, Any], required: bool) -> str | None:
+    """The page text from exactly one of content or content_file (None when neither and not required)."""
+    has_text = args.get("content") is not None
+    has_file = args.get("content_file") is not None
+    if has_text and has_file:
+        raise ValueError("Give the page text as content or as content_file, not both.")
+    if has_file:
+        return read_content_file(args["content_file"])
+    if has_text:
+        return args["content"]
+    if required:
+        raise ValueError("Page text is missing: pass content (a string) or content_file (an absolute path).")
+    return None
+
+
+# ===== Shared link wording (one link syntax everywhere: [text](url)) =====
+
+LINK_NOTE = "A link written as [text](url) shows as clickable text (http/https links only)."
+
+CHAT_LINK_NOTE = (
+    "With content_format text/md (the default), a link written as [text](url) shows as "
+    "clickable text; with text/plain it shows literally."
+)
+
+COMMENT_INPUTS_NOTE = (
+    "Text comes from exactly one of comment_text (plain text; a URL shows as a bare URL) "
+    "or markdown_text (markdown shown as ClickUp formatting: links, bold, italic, code, "
+    "lists, checklists, tables)."
+)
+
+
+def comment_input_props(text_desc: str) -> dict:
+    """The two interchangeable comment inputs, same wording on every comment tool."""
+    return {
+        "comment_text": {"type": "string", "description": f"{text_desc} (plain text)"},
+        "markdown_text": {
+            "type": "string",
+            "description": (
+                f"{text_desc} as markdown, sent as ClickUp rich text: [text](url) links "
+                "(http/https), **bold**, *italic*, `code`, ``` fenced code blocks, - bullet "
+                "lists, 1. numbered lists (ClickUp numbers them), - [ ] / - [x] checklists, "
+                "and pipe tables (header row, then a | --- | row). Line breaks are kept. "
+                "Headings, quotes, images, strikethrough and escaped characters stay literal. "
+                "With no formatting it is sent as plain text."
+            ),
+        },
+    }
+
+
+MARKDOWN_LIST_DESC = {
+    "type": "string",
+    "description": "List description as markdown (use instead of content; " + LINK_NOTE + ")",
+}
 
 # ===== Tool Definitions =====
 
@@ -194,7 +338,8 @@ TOOLS = [
             "properties": {
                 "folder_id": {"type": "string", "description": "Folder ID"},
                 "name": {"type": "string", "description": "List name"},
-                "content": {"type": "string", "description": "List description"},
+                "content": {"type": "string", "description": "List description (plain text)"},
+                "markdown_content": MARKDOWN_LIST_DESC,
                 "due_date": {"type": "integer", "description": "Due date timestamp (ms)"},
                 "due_date_time": {"type": "boolean", "description": "Include time in due date"},
                 "priority": {"type": "integer", "description": "Priority (1=urgent, 4=low)"},
@@ -224,7 +369,8 @@ TOOLS = [
             "properties": {
                 "space_id": {"type": "string", "description": "Space ID"},
                 "name": {"type": "string", "description": "List name"},
-                "content": {"type": "string", "description": "List description"},
+                "content": {"type": "string", "description": "List description (plain text)"},
+                "markdown_content": MARKDOWN_LIST_DESC,
                 "due_date": {"type": "integer", "description": "Due date timestamp (ms)"},
                 "priority": {"type": "integer", "description": "Priority (1=urgent, 4=low)"},
                 "assignee": {"type": "integer", "description": "Assignee user ID"},
@@ -250,7 +396,8 @@ TOOLS = [
             "properties": {
                 "list_id": {"type": "string", "description": "List ID"},
                 "name": {"type": "string", "description": "New list name"},
-                "content": {"type": "string", "description": "New description"},
+                "content": {"type": "string", "description": "New description (plain text)"},
+                "markdown_content": MARKDOWN_LIST_DESC,
                 "due_date": {"type": "integer", "description": "Due date timestamp (ms)"},
                 "due_date_time": {"type": "boolean", "description": "Include time in due date"},
                 "priority": {"type": "integer", "description": "Priority (1=urgent, 4=low)"},
@@ -306,7 +453,7 @@ TOOLS = [
                 "page": {"type": "integer", "description": "Page number (0-indexed)", "default": 0},
                 "order_by": {"type": "string", "description": "Order by field (id, created, updated, due_date)"},
                 "reverse": {"type": "boolean", "description": "Reverse order", "default": False},
-                "subtasks": {"type": "boolean", "description": "Include subtasks", "default": False},
+                "subtasks": {"type": "boolean", "description": "Include subtasks (default TRUE). WARNING: with false, searches MISS all subtasks - never conclude a task does not exist from a subtasks=false read.", "default": True},
                 "statuses": {"type": "array", "items": {"type": "string"}, "description": "Filter by statuses"},
                 "assignees": {"type": "array", "items": {"type": "string"}, "description": "Filter by assignee IDs"},
                 "tags": {"type": "array", "items": {"type": "string"}, "description": "Filter by tag names"},
@@ -369,7 +516,7 @@ TOOLS = [
                 "task_id": {"type": "string", "description": "Task ID (or custom task ID)"},
                 "custom_task_ids": {"type": "boolean", "description": "task_id is a custom ID", "default": False},
                 "team_id": {"type": "string", "description": "Team ID (required with custom_task_ids)"},
-                "include_subtasks": {"type": "boolean", "description": "Include subtasks", "default": False},
+                "include_subtasks": {"type": "boolean", "description": "Include subtasks (default TRUE). WARNING: with false, subtasks are invisible.", "default": True},
                 "include_markdown_description": {"type": "boolean", "description": "Include markdown", "default": False},
             },
             "required": ["task_id"],
@@ -429,7 +576,7 @@ TOOLS = [
                 "page": {"type": "integer", "description": "Page number", "default": 0},
                 "order_by": {"type": "string", "description": "Order by field"},
                 "reverse": {"type": "boolean", "description": "Reverse order"},
-                "subtasks": {"type": "boolean", "description": "Include subtasks"},
+                "subtasks": {"type": "boolean", "description": "Include subtasks (default TRUE). WARNING: with false, searches MISS all subtasks - never conclude a task does not exist from a subtasks=false read.", "default": True},
                 "space_ids": {"type": "array", "items": {"type": "string"}, "description": "Filter by space IDs"},
                 "project_ids": {"type": "array", "items": {"type": "string"}, "description": "Filter by folder IDs"},
                 "list_ids": {"type": "array", "items": {"type": "string"}, "description": "Filter by list IDs"},
@@ -614,7 +761,7 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "checklist_id": {"type": "string", "description": "Checklist ID"},
-                "name": {"type": "string", "description": "Item name"},
+                "name": {"type": "string", "description": "Item name (plain text; ClickUp documents no link format for checklist items, so [text](url) shows literally)"},
                 "assignee": {"type": "string", "description": "Assignee user ID"},
             },
             "required": ["checklist_id", "name"],
@@ -628,7 +775,7 @@ TOOLS = [
             "properties": {
                 "checklist_id": {"type": "string", "description": "Checklist ID"},
                 "checklist_item_id": {"type": "string", "description": "Checklist item ID"},
-                "name": {"type": "string", "description": "New item name"},
+                "name": {"type": "string", "description": "New item name (plain text; ClickUp documents no link format for checklist items, so [text](url) shows literally)"},
                 "resolved": {"type": "boolean", "description": "Mark as resolved/unresolved"},
                 "assignee": {"type": "string", "description": "Assignee user ID"},
                 "parent": {"type": "string", "description": "Parent checklist item ID (for nesting)"},
@@ -725,18 +872,18 @@ TOOLS = [
     ),
     Tool(
         name="create_task_comment",
-        description="Create a comment on a task",
+        description="Create a comment on a task. " + COMMENT_INPUTS_NOTE,
         inputSchema={
             "type": "object",
             "properties": {
                 "task_id": {"type": "string", "description": "Task ID"},
-                "comment_text": {"type": "string", "description": "Comment text"},
+                **comment_input_props("Comment text"),
                 "assignee": {"type": "string", "description": "Assign comment to user ID"},
                 "notify_all": {"type": "boolean", "description": "Notify all assignees", "default": False},
                 "custom_task_ids": {"type": "boolean", "description": "task_id is a custom ID"},
                 "team_id": {"type": "string", "description": "Team ID (required with custom_task_ids)"},
             },
-            "required": ["task_id", "comment_text"],
+            "required": ["task_id"],
         },
     ),
     Tool(
@@ -754,16 +901,16 @@ TOOLS = [
     ),
     Tool(
         name="create_list_comment",
-        description="Create a comment on a list",
+        description="Create a comment on a list. " + COMMENT_INPUTS_NOTE,
         inputSchema={
             "type": "object",
             "properties": {
                 "list_id": {"type": "string", "description": "List ID"},
-                "comment_text": {"type": "string", "description": "Comment text"},
+                **comment_input_props("Comment text"),
                 "assignee": {"type": "string", "description": "Assign comment to user ID"},
                 "notify_all": {"type": "boolean", "description": "Notify all assignees", "default": False},
             },
-            "required": ["list_id", "comment_text"],
+            "required": ["list_id"],
         },
     ),
     Tool(
@@ -781,28 +928,28 @@ TOOLS = [
     ),
     Tool(
         name="create_chat_view_comment",
-        description="Create a comment in a chat view",
+        description="Create a comment in a chat view. " + COMMENT_INPUTS_NOTE,
         inputSchema={
             "type": "object",
             "properties": {
                 "view_id": {"type": "string", "description": "View ID"},
-                "comment_text": {"type": "string", "description": "Comment text"},
+                **comment_input_props("Comment text"),
                 "notify_all": {"type": "boolean", "description": "Notify all", "default": False},
             },
-            "required": ["view_id", "comment_text"],
+            "required": ["view_id"],
         },
     ),
     Tool(
         name="update_comment",
-        description="Update a comment",
+        description="Update a comment (replaces its whole text). " + COMMENT_INPUTS_NOTE,
         inputSchema={
             "type": "object",
             "properties": {
                 "comment_id": {"type": "string", "description": "Comment ID"},
-                "comment_text": {"type": "string", "description": "New comment text"},
+                **comment_input_props("New comment text"),
                 "resolved": {"type": "boolean", "description": "Mark as resolved/unresolved"},
             },
-            "required": ["comment_id", "comment_text"],
+            "required": ["comment_id"],
         },
     ),
     Tool(
@@ -829,15 +976,15 @@ TOOLS = [
     ),
     Tool(
         name="create_threaded_comment",
-        description="Reply to a comment",
+        description="Reply to a comment. " + COMMENT_INPUTS_NOTE,
         inputSchema={
             "type": "object",
             "properties": {
                 "comment_id": {"type": "string", "description": "Parent comment ID"},
-                "comment_text": {"type": "string", "description": "Reply text"},
+                **comment_input_props("Reply text"),
                 "notify_all": {"type": "boolean", "description": "Notify all", "default": False},
             },
-            "required": ["comment_id", "comment_text"],
+            "required": ["comment_id"],
         },
     ),
     # ----- Attachments -----
@@ -1899,13 +2046,28 @@ TOOLS = [
     # ----- Docs (API v3) -----
     Tool(
         name="search_docs",
-        description="Search docs in a workspace (API v3)",
+        description=(
+            "List/filter docs in a workspace (API v3). NO FREE-TEXT SEARCH EXISTS: ClickUp's "
+            "public API has no query/search parameter for docs (verified 2026-07-20) - this "
+            "filters by METADATA only. To find a doc by name, narrow with parent_id/parent_type "
+            "(or page through with cursor), then match names client-side."
+        ),
         inputSchema={
             "type": "object",
             "properties": {
                 "team_id": {"type": "string", "description": "Workspace/Team ID"},
-                "query": {"type": "string", "description": "Search text (optional)"},
-                "cursor": {"type": "string", "description": "Pagination cursor (optional)"},
+                "doc_id": {"type": "string", "description": "Filter to the Doc with this ID (sent as the API's 'id' param)"},
+                "creator": {"type": "integer", "description": "Filter to Docs created by this user ID"},
+                "deleted": {"type": "boolean", "description": "Return deleted Docs (API default: false)"},
+                "archived": {"type": "boolean", "description": "Return archived Docs (API default: false)"},
+                "parent_id": {"type": "string", "description": "Filter to children of this parent's ID. Pair with parent_type."},
+                "parent_type": {
+                    "type": "string",
+                    "enum": ["SPACE", "FOLDER", "LIST", "EVERYTHING", "WORKSPACE", "4", "5", "6", "7", "12"],
+                    "description": "Filter to children of this parent type. WORKSPACE = docs sitting loose at the workspace root (not filed in a space/folder/list).",
+                },
+                "limit": {"type": "integer", "minimum": 10, "maximum": 100, "description": "Results per page, 10-100 (API default 50)"},
+                "cursor": {"type": "string", "description": "Pagination cursor: pass the previous response's next_cursor"},
             },
             "required": ["team_id"],
         },
@@ -1978,19 +2140,24 @@ TOOLS = [
     ),
     Tool(
         name="create_doc_page",
-        description="Create a page or subpage in a doc (API v3). Preferred way to add doc content.",
+        description=(
+            "Create a page or subpage in a doc (API v3). Preferred way to add doc content. "
+            "The page text comes from exactly one of content (a string) or content_file "
+            "(a local file, sent unchanged)."
+        ),
         inputSchema={
             "type": "object",
             "properties": {
                 "team_id": {"type": "string", "description": "Workspace/Team ID"},
                 "doc_id": {"type": "string", "description": "Doc ID"},
                 "name": {"type": "string", "description": "Page name"},
-                "content": {"type": "string", "description": "Page content (markdown)"},
+                "content": {"type": "string", "description": "Page content (markdown). Required unless content_file is given."},
+                "content_file": {"type": "string", "description": CONTENT_FILE_DESC},
                 "parent_page_id": {"type": "string", "description": "Parent page ID to nest under (optional)"},
                 "sub_title": {"type": "string", "description": "Page subtitle (optional)"},
                 "content_format": {"type": "string", "description": "text/md (default) or text/plain", "default": "text/md"},
             },
-            "required": ["team_id", "doc_id", "name", "content"],
+            "required": ["team_id", "doc_id", "name"],
         },
     ),
     Tool(
@@ -1998,7 +2165,9 @@ TOOLS = [
         description=(
             "Update a doc page (API v3). content_edit_mode defaults to 'append' (safe). "
             "'replace' REWRITES the page and flattens live task chips — it requires the "
-            "confirm token (RED tier)."
+            "confirm token (RED tier). New text comes from at most one of content (a string) "
+            "or content_file (a local file, sent unchanged); with neither, only the name or "
+            "subtitle changes."
         ),
         inputSchema={
             "type": "object",
@@ -2007,6 +2176,7 @@ TOOLS = [
                 "doc_id": {"type": "string", "description": "Doc ID"},
                 "page_id": {"type": "string", "description": "Page ID"},
                 "content": {"type": "string", "description": "Content to write (markdown)"},
+                "content_file": {"type": "string", "description": CONTENT_FILE_DESC},
                 "name": {"type": "string", "description": "New page name (optional)"},
                 "sub_title": {"type": "string", "description": "New subtitle (optional)"},
                 "content_edit_mode": {"type": "string", "description": "append (default) | prepend | replace (replace = RED tier, needs confirm)", "default": "append"},
@@ -2059,7 +2229,7 @@ TOOLS = [
             "properties": {
                 "team_id": {"type": "string", "description": "Workspace/Team ID"},
                 "channel_id": {"type": "string", "description": "Channel ID"},
-                "content": {"type": "string", "description": "Message text (max 40,000 chars)"},
+                "content": {"type": "string", "description": "Message text (max 40,000 chars). " + CHAT_LINK_NOTE},
                 "msg_type": {"type": "string", "description": "message (default) or post", "default": "message"},
                 "content_format": {"type": "string", "description": "text/md (default) or text/plain"},
                 "assignee": {"type": "string", "description": "Assignee user ID for the message"},
@@ -2227,7 +2397,7 @@ TOOLS = [
             "properties": {
                 "team_id": {"type": "string", "description": "Workspace/Team ID"},
                 "message_id": {"type": "string", "description": "Parent message ID"},
-                "content": {"type": "string", "description": "Reply text (max 40,000 chars)"},
+                "content": {"type": "string", "description": "Reply text (max 40,000 chars). " + CHAT_LINK_NOTE},
                 "msg_type": {"type": "string", "description": "message (default) or post", "default": "message"},
                 "content_format": {"type": "string", "description": "text/md (default) or text/plain"},
                 "post_data": {"type": "object", "description": "Required when msg_type='post': {title, subtype: {id}}"},
@@ -2246,7 +2416,7 @@ TOOLS = [
             "properties": {
                 "team_id": {"type": "string", "description": "Workspace/Team ID"},
                 "message_id": {"type": "string", "description": "Message ID"},
-                "content": {"type": "string", "description": "New message text"},
+                "content": {"type": "string", "description": "New message text. " + CHAT_LINK_NOTE},
                 "content_format": {"type": "string", "description": "text/md (default) or text/plain"},
                 "assignee": {"type": "string", "description": "Assignee user ID"},
                 "resolved": {"type": "boolean", "description": "Resolved status"},
@@ -2517,30 +2687,42 @@ async def execute_tool(client: ClickUpClient, name: str, args: dict[str, Any]) -
             args.get("start_id"),
         )
     elif name == "create_task_comment":
+        body = comment_body(args)
         return await client.create_task_comment(
             args["task_id"],
-            args["comment_text"],
+            body.get("comment_text"),
             args.get("assignee"),
             args.get("notify_all", False),
             args.get("custom_task_ids", False),
             args.get("team_id"),
+            comment=body.get("comment"),
         )
     elif name == "get_list_comments":
         return await client.get_list_comments(args["list_id"], args.get("start"), args.get("start_id"))
     elif name == "create_list_comment":
-        return await client.create_list_comment(args["list_id"], args["comment_text"], args.get("assignee"), args.get("notify_all", False))
+        body = comment_body(args)
+        return await client.create_list_comment(
+            args["list_id"], body.get("comment_text"), args.get("assignee"), args.get("notify_all", False), comment=body.get("comment")
+        )
     elif name == "get_chat_view_comments":
         return await client.get_chat_view_comments(args["view_id"], args.get("start"), args.get("start_id"))
     elif name == "create_chat_view_comment":
-        return await client.create_chat_view_comment(args["view_id"], args["comment_text"], args.get("notify_all", False))
+        body = comment_body(args)
+        return await client.create_chat_view_comment(
+            args["view_id"], body.get("comment_text"), args.get("notify_all", False), comment=body.get("comment")
+        )
     elif name == "update_comment":
-        return await client.update_comment(args["comment_id"], args["comment_text"], args.get("resolved"))
+        body = comment_body(args)
+        return await client.update_comment(args["comment_id"], body.get("comment_text"), args.get("resolved"), comment=body.get("comment"))
     elif name == "delete_comment":
         return await client.delete_comment(args["comment_id"])
     elif name == "get_threaded_comments":
         return await client.get_threaded_comments(args["comment_id"], args.get("start"), args.get("start_id"))
     elif name == "create_threaded_comment":
-        return await client.create_threaded_comment(args["comment_id"], args["comment_text"], args.get("notify_all", False))
+        body = comment_body(args)
+        return await client.create_threaded_comment(
+            args["comment_id"], body.get("comment_text"), args.get("notify_all", False), comment=body.get("comment")
+        )
 
     # Attachments
     elif name == "create_task_attachment":
@@ -2849,7 +3031,17 @@ async def execute_tool(client: ClickUpClient, name: str, args: dict[str, Any]) -
 
     # Docs (API v3)
     elif name == "search_docs":
-        return await client.search_docs(args["team_id"], args.get("query"), args.get("cursor"))
+        return await client.search_docs(
+            args["team_id"],
+            doc_id=args.get("doc_id"),
+            creator=args.get("creator"),
+            deleted=args.get("deleted"),
+            archived=args.get("archived"),
+            parent_id=args.get("parent_id"),
+            parent_type=args.get("parent_type"),
+            limit=args.get("limit"),
+            cursor=args.get("cursor"),
+        )
     elif name == "create_doc":
         return await client.create_doc(args["team_id"], args["name"], args.get("parent"), args.get("visibility"), args.get("create_page"))
     elif name == "get_doc":
@@ -2862,12 +3054,12 @@ async def execute_tool(client: ClickUpClient, name: str, args: dict[str, Any]) -
         return await client.get_doc_page(args["team_id"], args["doc_id"], args["page_id"], args.get("content_format", "text/md"))
     elif name == "create_doc_page":
         return await client.create_doc_page(
-            args["team_id"], args["doc_id"], args["name"], args["content"],
+            args["team_id"], args["doc_id"], args["name"], page_content(args, required=True),
             args.get("parent_page_id"), args.get("sub_title"), args.get("content_format", "text/md"),
         )
     elif name == "update_doc_page":
         return await client.update_doc_page(
-            args["team_id"], args["doc_id"], args["page_id"], args.get("content"),
+            args["team_id"], args["doc_id"], args["page_id"], page_content(args, required=False),
             args.get("name"), args.get("sub_title"), args.get("content_edit_mode", "append"),
             args.get("content_format", "text/md"),
         )

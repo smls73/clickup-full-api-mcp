@@ -88,7 +88,9 @@ class ClickUpClient:
                 response=response,
             )
 
-        if response.status_code == 204:
+        # A write can succeed with an empty body on any 2xx, not only 204 (update_doc_page
+        # returns 200 with no body). Same success shape as 204, never a JSON parse error.
+        if response.status_code == 204 or (200 <= response.status_code < 300 and not response.content.strip()):
             return {"success": True}
 
         return response.json()
@@ -230,7 +232,7 @@ class ClickUpClient:
         page: int = 0,
         order_by: Optional[str] = None,
         reverse: bool = False,
-        subtasks: bool = False,
+        subtasks: bool = True,
         statuses: Optional[list[str]] = None,
         include_markdown_description: bool = False,
         assignees: Optional[list[str]] = None,
@@ -305,7 +307,7 @@ class ClickUpClient:
         task_id: str,
         custom_task_ids: bool = False,
         team_id: Optional[str] = None,
-        include_subtasks: bool = False,
+        include_subtasks: bool = True,
         include_markdown_description: bool = False,
     ) -> dict:
         """Get a task."""
@@ -349,7 +351,7 @@ class ClickUpClient:
         page: int = 0,
         order_by: Optional[str] = None,
         reverse: bool = False,
-        subtasks: bool = False,
+        subtasks: bool = True,
         space_ids: Optional[list[str]] = None,
         project_ids: Optional[list[str]] = None,
         list_ids: Optional[list[str]] = None,
@@ -648,20 +650,33 @@ class ClickUpClient:
             params["start_id"] = start_id
         return await self.get(f"/task/{task_id}/comment", params=params)
 
+    @staticmethod
+    def _comment_payload(comment_text: Optional[str], comment: Optional[list[dict]]) -> dict:
+        """Exactly one of: rich-text `comment` blocks (links) or plain `comment_text`
+        (the body exactly as before). Never both: ClickUp documents `comment` as the
+        alternative to `comment_text`
+        (https://developer.clickup.com/docs/comment-formatting)."""
+        if (comment_text is None) == (comment is None):
+            raise ValueError("exactly one of comment_text or comment is required")
+        if comment is not None:
+            return {"comment": comment}
+        return {"comment_text": comment_text}
+
     async def create_task_comment(
         self,
         task_id: str,
-        comment_text: str,
+        comment_text: Optional[str] = None,
         assignee: Optional[str] = None,
         notify_all: bool = False,
         custom_task_ids: bool = False,
         team_id: Optional[str] = None,
+        comment: Optional[list[dict]] = None,
     ) -> dict:
         """Create a comment on a task."""
         params = {"custom_task_ids": str(custom_task_ids).lower()}
         if team_id:
             params["team_id"] = team_id
-        data = {"comment_text": comment_text, "notify_all": notify_all}
+        data = {**self._comment_payload(comment_text, comment), "notify_all": notify_all}
         if assignee:
             data["assignee"] = assignee
         return await self.post(f"/task/{task_id}/comment", json=data, params=params)
@@ -678,12 +693,13 @@ class ClickUpClient:
     async def create_list_comment(
         self,
         list_id: str,
-        comment_text: str,
+        comment_text: Optional[str] = None,
         assignee: Optional[str] = None,
         notify_all: bool = False,
+        comment: Optional[list[dict]] = None,
     ) -> dict:
         """Create a comment on a list."""
-        data = {"comment_text": comment_text, "notify_all": notify_all}
+        data = {**self._comment_payload(comment_text, comment), "notify_all": notify_all}
         if assignee:
             data["assignee"] = assignee
         return await self.post(f"/list/{list_id}/comment", json=data)
@@ -705,16 +721,23 @@ class ClickUpClient:
     async def create_chat_view_comment(
         self,
         view_id: str,
-        comment_text: str,
+        comment_text: Optional[str] = None,
         notify_all: bool = False,
+        comment: Optional[list[dict]] = None,
     ) -> dict:
         """Create a comment in a chat view."""
-        data = {"comment_text": comment_text, "notify_all": notify_all}
+        data = {**self._comment_payload(comment_text, comment), "notify_all": notify_all}
         return await self.post(f"/view/{view_id}/comment", json=data)
 
-    async def update_comment(self, comment_id: str, comment_text: str, resolved: Optional[bool] = None) -> dict:
+    async def update_comment(
+        self,
+        comment_id: str,
+        comment_text: Optional[str] = None,
+        resolved: Optional[bool] = None,
+        comment: Optional[list[dict]] = None,
+    ) -> dict:
         """Update a comment."""
-        data = {"comment_text": comment_text}
+        data = self._comment_payload(comment_text, comment)
         if resolved is not None:
             data["resolved"] = resolved
         return await self.put(f"/comment/{comment_id}", json=data)
@@ -740,11 +763,12 @@ class ClickUpClient:
     async def create_threaded_comment(
         self,
         comment_id: str,
-        comment_text: str,
+        comment_text: Optional[str] = None,
         notify_all: bool = False,
+        comment: Optional[list[dict]] = None,
     ) -> dict:
         """Create a threaded comment (reply)."""
-        data = {"comment_text": comment_text, "notify_all": notify_all}
+        data = {**self._comment_payload(comment_text, comment), "notify_all": notify_all}
         return await self.post(f"/comment/{comment_id}/reply", json=data)
 
     # ===== Attachments =====
@@ -1454,9 +1478,43 @@ class ClickUpClient:
 
     V3_URL = "https://api.clickup.com/api/v3"
 
-    async def search_docs(self, team_id: str, query: Optional[str] = None, cursor: Optional[str] = None) -> dict:
-        """Search docs in a workspace."""
-        return await self.get(f"{self.V3_URL}/workspaces/{team_id}/docs", params={"search": query, "next_cursor": cursor})
+    async def search_docs(
+        self,
+        team_id: str,
+        doc_id: Optional[str] = None,
+        creator: Optional[int] = None,
+        deleted: Optional[bool] = None,
+        archived: Optional[bool] = None,
+        parent_id: Optional[str] = None,
+        parent_type: Optional[str] = None,
+        limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+    ) -> dict:
+        """List/filter docs in a workspace (ClickUp `searchDocsPublic`).
+
+        NOTE: despite the endpoint's name, ClickUp has NO free-text doc search in the
+        public API — there is no `query`/`search` parameter (verified against ClickUp's
+        published parameter list 2026-07-20). This endpoint filters by METADATA only.
+        To find a doc by name: filter down with `parent_id`/`parent_type` (or pull pages
+        via `cursor`), then match names client-side.
+
+        parent_type accepts SPACE | FOLDER | LIST | EVERYTHING | WORKSPACE
+        (or their numeric equivalents 4 | 5 | 6 | 7 | 12).
+        limit: 10-100, API default 50.
+        """
+        return await self.get(
+            f"{self.V3_URL}/workspaces/{team_id}/docs",
+            params={
+                "id": doc_id,
+                "creator": creator,
+                "deleted": deleted,
+                "archived": archived,
+                "parent_id": parent_id,
+                "parent_type": parent_type,
+                "limit": limit,
+                "cursor": cursor,
+            },
+        )
 
     async def create_doc(
         self,
